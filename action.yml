@@ -1,0 +1,88 @@
+name: Qualio E2E
+description: Run Qualio AI's generated Playwright tests and report results, failure artifacts and heal requests to Qualio.
+author: Qualio AI
+branding:
+  icon: check-circle
+  color: purple
+
+inputs:
+  working-directory:
+    description: The tests folder Qualio generates (holds package.json and playwright.config.ts).
+    default: e2e
+  api-key:
+    description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, results are not reported.
+    required: true
+  api-url:
+    description: The Qualio URL that results are reported to (the generated workflow sets it).
+    required: true
+  base-url:
+    description: The URL of the environment under test. Empty uses the target URL in playwright.config.ts.
+    default: ''
+  commit-sha:
+    description: The commit the results belong to.
+    default: ${{ github.event.pull_request.head.sha || github.sha }}
+  node-version:
+    description: The Node.js version to run the tests with.
+    default: '20'
+  upload-report:
+    description: Keep Playwright's HTML report as a workflow artifact ("true" or "false").
+    default: 'true'
+  report-retention-days:
+    description: Days to keep the HTML report artifact.
+    default: '14'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+
+    - name: Read the Playwright version
+      id: playwright
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Playwright browsers
+      id: browsers
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium
+
+    - name: Install Chromium
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ "${{ steps.browsers.outputs.cache-hit }}" = "true" ]; then
+          npx playwright install-deps chromium
+        else
+          npx playwright install --with-deps chromium
+        fi
+
+    # The tests folder's support/qualio-reporter.ts reads these. Test account secrets
+    # (E2E_<ROLE>_USERNAME / _PASSWORD) come from the calling job's env.
+    - name: Run Playwright tests
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: npx playwright test
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
+
+    - uses: actions/upload-artifact@v4
+      if: ${{ !cancelled() && inputs.upload-report == 'true' }}
+      with:
+        name: playwright-report
+        path: ${{ inputs.working-directory }}/playwright-report
+        retention-days: ${{ inputs.report-retention-days }}
+        if-no-files-found: ignore

@@ -1,0 +1,29 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  fixture:
+    runs-on: ubuntu-latest
+    # Test account secrets reach the tests through the job env, as in the generated workflow.
+    env:
+      E2E_ADMIN_USERNAME: admin@example.test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          working-directory: test/fixture
+          api-key: ''
+          api-url: http://qualio.test
