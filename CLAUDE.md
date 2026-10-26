@@ -16,4 +16,9 @@ The GitHub Action (composite, `action.yml`) that customers' `.github/workflows/q
 - **Composite only:** steps use `shell: bash` and `working-directory: ${{ inputs.working-directory }}`; third-party actions are pinned to a major version (`actions/*@v4`).
 - **Never fail silently:** a failing test must fail the job; the HTML report upload runs `if: !cancelled()`.
 - **Playwright version:** browsers are cached per the tests folder's `@playwright/test` version. Keep `test/fixture` on the same version as qualio-webapp (`packages/reporter`, `docker/hosted-runner`).
-- Check changes with the `Test` workflow (actionlint plus `uses: ./` on `test/fixture`), and run the fixture locally (see the README).
+- **Steps:** a preflight checks the tests folder (and warns, without echoing it, when the key is empty); the test output is `tee`'d to `$RUNNER_TEMP/qualio-playwright.log` so the job summary and the `qualio-run-url` output can pick up the reporter's `[qualio] Results reported: <url>` line. Keep that log line format in step with `../qualio-webapp/packages/reporter`.
+- Check changes with the `Test` workflow (actionlint, `uses: ./` on `test/fixture`, and the missing-folder failure path), and run the fixture locally (see the README).
+
+## Releasing
+
+Published as `qualio-ai/qualio-action` (public). Publishing a GitHub release `vX.Y.Z` runs `.github/workflows/release.yml`, which moves the major tag (`v1`). The README's Part 3 has the step-by-step publishing guide.

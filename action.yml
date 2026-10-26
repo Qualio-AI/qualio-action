@@ -31,9 +31,41 @@ inputs:
     description: Days to keep the HTML report artifact.
     default: '14'
 
+outputs:
+  playwright-version:
+    description: The @playwright/test version installed in the tests folder.
+    value: ${{ steps.playwright.outputs.version }}
+  qualio-run-url:
+    description: The Qualio page of this run. Empty when the results were not reported.
+    value: ${{ steps.summary.outputs.run-url }}
+
 runs:
   using: composite
   steps:
+    # Fail early with a readable message instead of an npm error. Only whether the key is set
+    # reaches this step, never the key itself.
+    - name: Check the tests folder
+      shell: bash
+      env:
+        TESTS_DIR: ${{ inputs.working-directory }}
+        HAS_API_KEY: ${{ inputs.api-key != '' }}
+        HAS_API_URL: ${{ inputs.api-url != '' }}
+      run: |
+        rm -f "$RUNNER_TEMP/qualio-playwright.log"
+        if [ ! -d "$TESTS_DIR" ]; then
+          echo "::error title=Qualio::The tests folder '$TESTS_DIR' does not exist. Set the action's working-directory input to the folder Qualio generated (it holds package.json and playwright.config.ts), and check out the repository first with actions/checkout."
+          exit 1
+        fi
+        for file in package.json playwright.config.ts; do
+          if [ ! -f "$TESTS_DIR/$file" ]; then
+            echo "::error title=Qualio::'$TESTS_DIR/$file' is missing. Is working-directory the folder Qualio generated?"
+            exit 1
+          fi
+        done
+        if [ "$HAS_API_KEY" != "true" ] || [ "$HAS_API_URL" != "true" ]; then
+          echo "::warning title=Qualio::api-key or api-url is empty: the tests run, but results are not reported to Qualio and failures are not self-healed. Add the QUALIO_API_KEY repository secret."
+        fi
+
     - uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
@@ -69,10 +101,13 @@ runs:
 
     # The tests folder's support/qualio-reporter.ts reads these. Test account secrets
     # (E2E_<ROLE>_USERNAME / _PASSWORD) come from the calling job's env.
+    # The output is also kept in a log so the summary can link to the Qualio run.
+    # (shell: bash runs with pipefail, so a failing test still fails the step.)
     - name: Run Playwright tests
+      id: test
       shell: bash
       working-directory: ${{ inputs.working-directory }}
-      run: npx playwright test
+      run: npx playwright test 2>&1 | tee "$RUNNER_TEMP/qualio-playwright.log"
       env:
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
@@ -86,3 +121,47 @@ runs:
         path: ${{ inputs.working-directory }}/playwright-report
         retention-days: ${{ inputs.report-retention-days }}
         if-no-files-found: ignore
+
+    - name: Summary
+      id: summary
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        OUTCOME: ${{ steps.test.outcome }}
+        COMMIT_SHA: ${{ inputs.commit-sha }}
+        UPLOAD_REPORT: ${{ inputs.upload-report }}
+      run: |
+        log="$RUNNER_TEMP/qualio-playwright.log"
+        run_url=""
+        healing=""
+        if [ -f "$log" ]; then
+          run_url=$(sed -n 's/.*\[qualio\] Results reported: \(http[^[:space:]]*\).*/\1/p' "$log" | tail -n 1)
+          if grep -q '\[qualio\] Self-healing requested' "$log"; then healing=true; fi
+        fi
+        echo "run-url=$run_url" >> "$GITHUB_OUTPUT"
+        case "$OUTCOME" in
+          success) result="✅ Passed" ;;
+          failure) result="❌ Failed" ;;
+          skipped) result="⏭️ Not run (an earlier step failed)" ;;
+          *) result="$OUTCOME" ;;
+        esac
+        {
+          echo "### Qualio E2E"
+          echo ""
+          echo "| | |"
+          echo "| --- | --- |"
+          echo "| Result | $result |"
+          echo "| Commit | \`$COMMIT_SHA\` |"
+          if [ -n "$run_url" ]; then
+            echo "| Qualio | [Open the run in Qualio]($run_url) |"
+          elif [ "$OUTCOME" != "skipped" ]; then
+            echo "| Qualio | Not reported (see the \`[qualio]\` lines in the test log) |"
+          fi
+          if [ "$UPLOAD_REPORT" = "true" ] && [ "$OUTCOME" != "skipped" ]; then
+            echo "| HTML report | The \`playwright-report\` artifact of this workflow run |"
+          fi
+          if [ -n "$healing" ]; then
+            echo ""
+            echo "Qualio is diagnosing the failures. Test drift is fixed with a \`[qualio-heal]\` commit on this pull request; real application bugs are reported, never healed."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"

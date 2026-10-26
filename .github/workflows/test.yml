@@ -22,8 +22,30 @@ jobs:
       E2E_ADMIN_USERNAME: admin@example.test
     steps:
       - uses: actions/checkout@v4
-      - uses: ./
+      - id: action
+        uses: ./
         with:
           working-directory: test/fixture
           api-key: ''
           api-url: http://qualio.test
+      - name: The action reports its outputs
+        env:
+          PLAYWRIGHT_VERSION: ${{ steps.action.outputs.playwright-version }}
+        run: test "$PLAYWRIGHT_VERSION" = "$(node -p "require('./test/fixture/package.json').devDependencies['@playwright/test']")"
+
+  # A wrong working-directory must fail the job with a readable error, before npm runs.
+  missing-folder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: action
+        uses: ./
+        continue-on-error: true
+        with:
+          working-directory: does-not-exist
+          api-key: ''
+          api-url: http://qualio.test
+      - name: The action failed
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: test "$OUTCOME" = failure

@@ -1,0 +1,35 @@
+name: Release
+
+# Publishing a release tagged v1.2.3 moves the major tag (v1) to it, so customers pinned to
+# qualio-ai/qualio-action@v1 get the release.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  major-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Move the major tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          if ! [[ "$TAG" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tags must look like v1.2.3 (got '$TAG')."
+            exit 1
+          fi
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "Pre-release: v${BASH_REMATCH[1]} is left where it is."
+            exit 0
+          fi
+          major="v${BASH_REMATCH[1]}"
+          git tag -f "$major" "$TAG"
+          git push -f origin "refs/tags/$major"
+          echo "Moved $major to $TAG ($(git rev-parse --short "$TAG"))."
