@@ -244,7 +244,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `api-url` | required | The Qualio URL that results are reported to. |
 | `base-url` | `''` | The environment under test. Empty uses the target URL in `playwright.config.ts`. |
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
-| `setup-wait-minutes` | `100` | The first run (no test suite yet) maps the app and checks the generated tests in the job. How long that may take before the job gives up; a re-run continues where it stopped. |
+| `setup-wait-minutes` | `25` | The first run (no test suite yet) maps the app and checks the generated tests in the job. How long that may take before the job gives up; a re-run continues where it stopped. Keep it a few minutes under the job's `timeout-minutes`. |
 | `heal-wait-minutes` | `10` | With `tests-source: qualio`, how long to wait for Qualio's heal of a failed run before giving up on the re-run. |
 | `node-version` | `20` | The Node.js version. |
 | `upload-report` | `true` | Keep Playwright's HTML report as the `playwright-report` artifact. |
@@ -262,7 +262,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 ### What it does
 
 1. Checks that `working-directory` holds a tests folder (on the setup pull request it may not exist yet), and warns if `api-key` or `api-url` is empty.
-2. Asks Qualio whether the project has a first test suite (`POST /v1/setup/start`). If not, sets it up in this job: runs the mapper Qualio sends, waits for the suite (`/v1/setup/:id/status`), and runs each check of it (`/v1/tests/bundle` with `suiteId`, `QUALIO_RUN_ROUND` = the check) until it is ready; the job then ends (`setup-state` output `completed`). Up to `setup-wait-minutes` (default 100).
+2. Asks Qualio whether the project has a first test suite (`POST /v1/setup/start`). If not, sets it up in this job: runs the mapper Qualio sends, waits for the suite (`/v1/setup/:id/status`), and runs each check of it (`/v1/tests/bundle` with `suiteId`, `QUALIO_RUN_ROUND` = the check; no retries and a 20-second test timeout, so a wrong locator fails fast) until it is ready; the job then ends (`setup-state` output `completed`). Up to `setup-wait-minutes` (default 25).
 3. Sets up Node.js.
 4. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise).
 5. Installs Chromium and its system dependencies, caching the browser per Playwright version.

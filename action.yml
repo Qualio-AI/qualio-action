@@ -25,8 +25,8 @@ inputs:
     description: The commit the results belong to.
     default: ${{ github.event.pull_request.head.sha || github.sha }}
   setup-wait-minutes:
-    description: The first run (no test suite yet) maps the application in this job and checks the generated tests here until they pass. How long it may take in all before the job gives up (a re-run continues where it stopped).
-    default: '100'
+    description: The first run (no test suite yet) maps the application in this job and checks the generated tests here until they pass. How long it may take in all before the job gives up (a re-run continues where it stopped). Keep it a few minutes under the job's timeout-minutes, so the action stops cleanly instead of GitHub cancelling the job.
+    default: '25'
   heal-wait-minutes:
     description: With tests-source qualio, how long to wait for Qualio to heal failed tests before giving up on the re-run.
     default: '10'

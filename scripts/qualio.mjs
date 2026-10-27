@@ -16,6 +16,8 @@ import path from 'node:path';
 const apiUrl = (process.env.QUALIO_API_URL ?? '').replace(/\/+$/, '');
 const apiKey = process.env.QUALIO_API_KEY ?? '';
 const POLL_MS = Number(process.env.QUALIO_POLL_MS || 10_000);
+/** Per test in the setup's checks (generated tests use short action and expect timeouts too). */
+const CHECK_TEST_TIMEOUT_MS = 20_000;
 
 async function output(values) {
   const lines = Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join('');
@@ -146,7 +148,8 @@ async function setup(testsDir, mapDir, branch, minutes) {
       await writeFiles(testsDir, bundle.body.files);
       await install(testsDir);
       // Failures are expected here: Qualio repairs those tests (or drops them) and the next check runs.
-      await run('npx', ['playwright', 'test'], { cwd: testsDir, env: { QUALIO_RUN_ROUND: String(checked) } });
+      // No retries and a short test timeout: a retry tells Qualio nothing new and only costs the job's time.
+      await run('npx', ['playwright', 'test', '--retries=0', `--timeout=${CHECK_TEST_TIMEOUT_MS}`], { cwd: testsDir, env: { QUALIO_RUN_ROUND: String(checked) } });
       console.log('::endgroup::');
     } else if (state.state === 'done') {
       const result = state.result ?? { tests: 0, features: 0, dropped: [] };
