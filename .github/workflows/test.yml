@@ -77,7 +77,7 @@ jobs:
           test "$HEAL" = patched
           test "$RUN_URL" = http://stub.test/runs/run_2
           routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).join(' ')")
-          test "$routes" = "/v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status /v1/tests/bundle"
+          test "$routes" = "/v1/setup/start /v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status /v1/tests/bundle"
 
   # tests-source: qualio when the project asks first: the heal ends "proposed", nothing is re-run,
   # and the job fails until someone decides in Qualio.
@@ -105,4 +105,58 @@ jobs:
           test "$OUTCOME" = failure
           test "$HEAL" = proposed
           routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).join(' ')")
-          test "$routes" = "/v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status"
+          test "$routes" = "/v1/setup/start /v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status"
+
+  # A project without a first test suite: the job maps the app with Qualio's mapper, then checks the
+  # generated suite until it passes (the stub's first check fails, the "repaired" second passes),
+  # and doesn't run the tests again afterwards.
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API (no first suite yet)
+        run: |
+          node test/stub-qualio.mjs 4555 setup &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: action
+        uses: ./
+        env:
+          QUALIO_POLL_MS: '500'
+        with:
+          tests-source: qualio
+          api-key: qk_stub
+          api-url: http://localhost:4555
+      - name: The suite was set up in the same job
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          SETUP: ${{ steps.action.outputs.setup-state }}
+        run: |
+          test "$OUTCOME" = success
+          test "$SETUP" = completed
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r !== '/v1/setup/s1/status').join(' ')")
+          test "$routes" = "/v1/setup/start /v1/setup/s1/mapped /v1/tests/bundle /v1/runs /v1/tests/bundle /v1/runs"
+
+  # Tests kept in the repository, on the setup pull request: no tests folder yet is not an error.
+  setup-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API (no first suite yet)
+        run: |
+          node test/stub-qualio.mjs 4555 setup &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: action
+        uses: ./
+        env:
+          QUALIO_POLL_MS: '500'
+        with:
+          working-directory: e2e-not-yet-committed
+          api-key: qk_stub
+          api-url: http://localhost:4555
+      - name: The suite was set up without a tests folder
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          SETUP: ${{ steps.action.outputs.setup-state }}
+        run: |
+          test "$OUTCOME" = success
+          test "$SETUP" = completed
