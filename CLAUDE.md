@@ -23,4 +23,4 @@ The GitHub Action (composite, `action.yml`) that customers' `.github/workflows/q
 
 ## Releasing
 
-Published as `qualio-ai/qualio-action` (public). Publishing a GitHub release `vX.Y.Z` runs `.github/workflows/release.yml`, which moves the major tag (`v1`). The README's Part 3 has the step-by-step publishing guide.
+Lives at `Qualio-AI/qualio-action`, referenced as `qualio-ai/qualio-action@v1` (owner names are case-insensitive); customers outside the organization need the repository public. Publishing a GitHub release `vX.Y.Z` runs `.github/workflows/release.yml`, which moves the major tag (`v1`); `v1` is on `v1.1.0`. The README's Part 3 has the step-by-step publishing guide.

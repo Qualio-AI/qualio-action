@@ -1,6 +1,6 @@
 # Qualio E2E action
 
-Runs the Playwright tests that [Qualio AI](https://github.com/qualio-ai) generates in your repository, then reports the results to Qualio. It sends pass/fail per test, logs, and failure artifacts (videos, screenshots, traces, DOM and ARIA snapshots). Failures go to Qualio's Runner, which fixes test drift (renamed buttons, moved fields) with a commit to the same pull request. It never hides a real application bug.
+Runs the Playwright tests that [Qualio AI](https://github.com/Qualio-AI) generates in your repository, then reports the results to Qualio. It sends pass/fail per test, logs, and failure artifacts (videos, screenshots, traces, DOM and ARIA snapshots). Failures go to Qualio's Runner, which fixes test drift (renamed buttons, moved fields) with a commit to the same pull request. It never hides a real application bug.
 
 The tests run on your own GitHub Actions runner, inside your network, so Qualio never needs access to private environments.
 
@@ -216,7 +216,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 
 | Symptom | Fix |
 | --- | --- |
-| `Unable to resolve action qualio-ai/qualio-action@v1` | The `uses:` line must be exactly `qualio-ai/qualio-action@v1`. If your organization restricts actions (**Settings → Actions → General → Allow … actions**), allow `qualio-ai/qualio-action@*`. |
+| `Unable to resolve action qualio-ai/qualio-action@v1` | The `uses:` line must be exactly `qualio-ai/qualio-action@v1`. If your organization restricts actions (**Settings → Actions → General → Allow … actions**), allow `qualio-ai/qualio-action@*`. While the action's repository is private, only repositories in the `Qualio-AI` organization can use it (Part 3, step 1). |
 | `The tests folder 'e2e' does not exist` | `working-directory` must match the tests folder chosen in Qualio, and `actions/checkout` must run before the action. |
 | `api-key or api-url is empty` warning, or `[qualio] … not set` | Add the `QUALIO_API_KEY` secret. Pull requests from **forks** get no secrets from GitHub, so their runs are never reported. |
 | `[qualio] Could not register the run: 401` | The key is wrong, revoked or belongs to another project. Create a new one under **Settings → API keys** and update the secret. |
@@ -284,70 +284,47 @@ Releases are tagged `v1.x.y`, and the `v1` tag moves to the latest `v1` release.
 
 ## Part 3: Publishing this action
 
-Every customer's `qualio.yml` calls `qualio-ai/qualio-action@v1`. That reference resolves only once this repository is **public**, at **`github.com/qualio-ai/qualio-action`**, with a **`v1`** tag. Until then, every customer workflow fails with "Unable to resolve action". The default reference lives in `qualio-webapp/packages/agents/src/coder/scaffold.ts` (`QUALIO_ACTION_REF`).
+This repository lives at **[`github.com/Qualio-AI/qualio-action`](https://github.com/Qualio-AI/qualio-action)**. GitHub owner names are case-insensitive, so the `qualio-ai/qualio-action@v1` reference in customers' `qualio.yml` (the default `QUALIO_ACTION_REF` in `qualio-webapp/packages/agents/src/coder/scaffold.ts`) resolves to it. Released so far: `v1.0.0` and `v1.1.0` (`tests-source: qualio`), with `v1` on `v1.1.0`.
 
-### 1. Create the `qualio-ai` organization (once)
+### 1. Make it public and allow it to be used
 
-1. On GitHub, open your avatar menu → **Your organizations → New organization** (the Free plan is enough).
-2. Name it **`qualio-ai`**. If that name is taken, pick another and update `QUALIO_ACTION_REF` in qualio-webapp, its tests, `.env.example`, the Getting Started page and this README.
-3. Add the other maintainers as members.
-
-### 2. Move the repository into the organization
-
-The repository currently lives at `ThiagoSilvaF/qualio-action`. **Transfer** it (GitHub keeps redirects, issues and history):
-
-1. Open `https://github.com/ThiagoSilvaF/qualio-action` → **Settings → General → Danger Zone → Transfer**.
-2. Enter `qualio-ai` as the new owner and confirm.
-3. Point your local clone at the new location:
-
-   ```sh
-   cd qualio-action
-   git remote set-url origin https://github.com/qualio-ai/qualio-action.git
-   git fetch origin
-   ```
-
-Alternatively, create an empty **public** `qualio-ai/qualio-action` repository (no README or license, so there is no conflicting history) and push to it:
-
-```sh
-git remote set-url origin https://github.com/qualio-ai/qualio-action.git
-git push -u origin main
-```
-
-### 3. Make it public and allow it to be used
+Customers' workflows can only use the action once the repository is **public**. Until then, they fail with "Unable to resolve action".
 
 1. **Settings → General → Danger Zone → Change visibility → Public**. Other organizations' workflows can only use actions from public repositories (or, on GitHub Enterprise, internal repositories that allow access).
-2. **Settings → Actions → General**: allow actions (needed for this repository's own `Test` and `Release` workflows). Under **Workflow permissions**, keep the default read permissions. The `Release` workflow asks for `contents: write` itself.
-3. Optional: protect `main` (**Settings → Branches**) and require the `lint`, `fixture` and `missing-folder` checks.
+2. While it is private, repositories in the `Qualio-AI` organization (such as the school demo) can still use it: **Settings → Actions → General → Access → Accessible from repositories in the 'Qualio-AI' organization**.
+3. **Settings → Actions → General**: allow actions (needed for this repository's own `Test` and `Release` workflows). Under **Workflow permissions**, keep the default read permissions. The `Release` workflow asks for `contents: write` itself.
+4. Optional: protect `main` (**Settings → Branches**) and require the `lint`, `fixture`, `missing-folder` and `qualio-source` checks.
 
-### 4. Check that the tests pass
+### 2. Check that the tests pass
 
-Pushing to `main` runs the **Test** workflow: actionlint, the action on `test/fixture` (with `uses: ./`), and a run with a missing folder that must fail cleanly. Open **Actions → Test** and make sure it is green before releasing.
+Pushing to `main` runs the **Test** workflow: actionlint, the action on `test/fixture` (with `uses: ./`), a run with a missing folder that must fail cleanly, and `tests-source: qualio` against the stub Qualio API (`test/stub-qualio.mjs`: fail, heal, re-run, pass). Open **Actions → Test** and make sure it is green before releasing.
 
-### 5. Release `v1.0.0`
+### 3. Release a version
 
-With the GitHub CLI, from an up-to-date `main`:
+Use `vX.Y.Z`: a new minor version (`v1.2.0`) for a feature or a new optional input, a patch (`v1.1.1`) for a fix. With the GitHub CLI, from an up-to-date `main`:
 
 ```sh
-gh release create v1.0.0 --repo qualio-ai/qualio-action --target main \
-  --title "v1.0.0" --notes "First release of the Qualio E2E action."
+gh release create v1.2.0 --repo Qualio-AI/qualio-action --target main \
+  --title "v1.2.0" --notes "What changed for workflows using @v1."
 ```
 
-Or in the browser: **Releases → Draft a new release → Choose a tag → type `v1.0.0` → Create new tag on publish**, target `main`, add notes, then **Publish release**.
+Or in the browser: **Releases → Draft a new release → Choose a tag → type the version → Create new tag on publish**, target `main`, add notes, then **Publish release**.
 
-Publishing the release runs the **Release** workflow, which creates (or moves) the **`v1`** tag to the same commit. Check it:
+Publishing the release runs the **Release** workflow, which moves the **`v1`** tag to the same commit. Check it:
 
 ```sh
 git fetch --tags --force origin
-git rev-parse v1.0.0^{commit} v1^{commit}   # both lines must be the same SHA
+git rev-parse v1.2.0^{commit} v1^{commit}   # both lines must be the same SHA
 ```
 
-If the workflow can't push the tag (for example, an organization policy forces read-only tokens), move it by hand:
+If the workflow can't push the tag (for example, an organization policy forces read-only tokens), or to release without creating a GitHub release, tag and move `v1` by hand:
 
 ```sh
-git tag -f v1 v1.0.0 && git push -f origin refs/tags/v1
+git tag v1.2.0 && git push origin v1.2.0
+git tag -f v1 v1.2.0 && git push -f origin refs/tags/v1
 ```
 
-### 6. Optional: list it on the GitHub Marketplace
+### 4. Optional: list it on the GitHub Marketplace
 
 Listing isn't required for `uses: qualio-ai/qualio-action@v1` to work, but it makes the action discoverable.
 
@@ -357,24 +334,24 @@ Requirements: the repository is public, it has exactly one action metadata file 
 2. The action's `name:` must be unique on the Marketplace, and must not match a Marketplace category, a GitHub feature or another user's or organization's name. If **Qualio E2E** is rejected, change `name:` in `action.yml` (e.g. `Qualio AI E2E Tests`). This doesn't affect `uses:`.
 3. When drafting a release, tick **Publish this Action to the GitHub Marketplace**, choose the categories (*Testing*, *Continuous integration*) and publish. The `branding` (icon `check-circle`, colour `purple`) is already set.
 
-### 7. Point Qualio at the published action
+### 5. Point Qualio at the published action
 
 `qualio-webapp` already defaults to `qualio-ai/qualio-action@v1`, so no change is needed. To test unreleased changes, set `QUALIO_ACTION_REF` in qualio-webapp's `.env` (e.g. `qualio-ai/qualio-action@my-branch` or a fork). This only affects workflows Qualio generates from then on, because an existing `qualio.yml` is never overwritten.
 
-### 8. Verify end to end from a scratch repository
+### 6. Verify end to end from a scratch repository
 
-1. Create a private test repository with a Qualio project connected to it (Part 1, Steps 1–5). The [school demo](https://github.com/ThiagoSilvaF/qualio-school-demo) makes a good target app.
-2. Approve a feature. Qualio's pull request adds `e2e/` and `qualio.yml`.
-3. Confirm the **Qualio E2E** check runs, its summary links to the run in Qualio, and the run appears under **Runs**.
+1. Create a private test repository with a Qualio project connected to it (Part 1, Steps 1–5). The [school demo](https://github.com/Qualio-AI/qualio-school-demo) makes a good target app.
+2. Approve a feature. With **Where tests live** set to *Repository*, Qualio's pull request adds `e2e/` and `qualio.yml`; with *Qualio*, add the workflow from the Getting started page yourself and open any pull request.
+3. Confirm the **Qualio E2E** check runs, its summary links to the run in Qualio, and the run appears under **Runs**. With *Qualio*, change a button label in the pull request: the summary should show **Heal: patched** and a passing re-run.
 
 ### Later releases
 
 1. Merge the changes to `main` and wait for **Test** to pass.
-2. `gh release create v1.1.0 …` (a feature or new optional input) or `v1.0.1` (a fix). **Release** moves `v1`.
+2. Release the next version (step 3). **Release** moves `v1`.
 3. **Never break `v1`.** Customers' workflows are never rewritten, so removing or renaming an input, or changing a default's meaning, needs `v2.0.0`. That release creates a `v2` tag automatically, and you then update `QUALIO_ACTION_REF` in qualio-webapp to `@v2`.
-4. When you add or rename an input, also update `workflowFile()` and its tests in qualio-webapp, the in-app Getting Started page and this README.
+4. When you add or rename an input, also update `workflowFile()` / `servedWorkflowFile()` and their tests in qualio-webapp, the in-app Getting Started page and this README.
 
-To withdraw a bad release, move `v1` back to the previous good tag (`git tag -f v1 v1.0.0 && git push -f origin refs/tags/v1`), then mark the bad release as a pre-release or delete it.
+To withdraw a bad release, move `v1` back to the previous good tag (`git tag -f v1 v1.1.0 && git push -f origin refs/tags/v1`), then mark the bad release as a pre-release or delete it.
 
 ---
 
