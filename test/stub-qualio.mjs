@@ -3,10 +3,12 @@
 // next download serves the fixed test. A tiny reporter in the bundle writes the run file the way
 // Qualio's reporter does. GET /__calls lists the requests received.
 //
-//   node test/stub-qualio.mjs [port]     (default 4555)
+//   node test/stub-qualio.mjs [port] [propose]     (default 4555; "propose": the project asks first,
+//                                                  so the heal ends "proposed" and nothing is fixed)
 import http from 'node:http';
 
 const port = Number(process.argv[2] || 4555);
+const propose = process.argv[3] === 'propose';
 const calls = [];
 let healPolls = 0;
 let healed = false;
@@ -59,6 +61,7 @@ http
     if (req.url === '/v1/tests/bundle') return res.end(JSON.stringify(bundle()));
     if (req.url === '/v1/tests/heal/status') {
       healPolls += 1;
+      if (propose) return res.end(JSON.stringify({ status: healPolls >= 2 ? 'proposed' : 'running' }));
       healed = healPolls >= 2;
       return res.end(JSON.stringify({ status: healed ? 'patched' : 'running' }));
     }

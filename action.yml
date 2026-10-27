@@ -45,7 +45,7 @@ outputs:
     description: The Qualio page of this run (of the re-run after a heal, when there was one). Empty when the results were not reported.
     value: ${{ steps.summary.outputs.run-url }}
   heal-status:
-    description: With tests-source qualio, how healing a failed run ended (patched, not_healable, stopped, failed, timeout, none). Empty when the tests passed or weren't run.
+    description: With tests-source qualio, how healing a failed run ended (patched, proposed, declined, not_healable, stopped, failed, timeout, none). Empty when the tests passed or weren't run.
     value: ${{ steps.heal.outputs.status }}
 
 runs:
@@ -279,6 +279,12 @@ runs:
           elif [ "$HEAL" = "not_healable" ]; then
             echo ""
             echo "Qualio did not change the tests: the failures look like bugs in the application. See the run in Qualio."
+          elif [ "$HEAL" = "proposed" ]; then
+            echo ""
+            echo "The UI changed, and Qualio proposes a fix for the tests. In Qualio, accept the change (the tests are updated) or mark it as a bug, then re-run this workflow."
+          elif [ "$HEAL" = "declined" ]; then
+            echo ""
+            echo "This UI change was marked as a bug in Qualio, so the tests were not changed. Fix the application."
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 
@@ -288,9 +294,14 @@ runs:
       shell: bash
       env:
         RERUN: ${{ steps.rerun.outcome }}
+        HEAL: ${{ steps.heal.outputs.status }}
+        RUN_URL: ${{ steps.summary.outputs.run-url }}
       run: |
         if [ "$RERUN" = "success" ]; then
           echo "The tests pass after Qualio healed them."
+        elif [ "$HEAL" = "proposed" ]; then
+          echo "::error title=Qualio::Qualio proposes a fix: review it in Qualio${RUN_URL:+ ($RUN_URL)}. Accept the UI change or mark it as a bug, then re-run this workflow."
+          exit 1
         else
           echo "::error title=Qualio::The E2E tests failed. See the job summary and the run in Qualio."
           exit 1

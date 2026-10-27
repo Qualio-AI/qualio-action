@@ -18,7 +18,7 @@ The GitHub Action (composite, `action.yml`) that customers' `.github/workflows/q
 - **Never fail silently:** a failing test must fail the job; the HTML report upload runs `if: !cancelled()`.
 - **Playwright version:** browsers are cached per the tests folder's `@playwright/test` version. Keep `test/fixture` on the same version as qualio-webapp (`packages/reporter`, `docker/hosted-runner`).
 - **Steps:** a preflight checks the tests folder (and warns, without echoing it, when the key is empty); the test output is `tee`'d to `$RUNNER_TEMP/qualio-playwright.log` so the job summary and the `qualio-run-url` output can pick up the reporter's `[qualio] Results reported: <url>` line. Keep that log line format in step with `../qualio-webapp/packages/reporter`.
-- **Qualio mode never fails silently either:** the first run's step continues on error so the heal and re-run can follow, and the final `Result` step fails the job unless the re-run passed.
+- **Qualio mode never fails silently either:** the first run's step continues on error so the heal and re-run can follow, and the final `Result` step fails the job unless the re-run passed. A `proposed` heal (the project asks first) ends the wait at once and fails the job with a pointer to Qualio; there is no re-run until someone decides.
 - Check changes with the `Test` workflow (actionlint, `uses: ./` on `test/fixture`, the missing-folder failure path, and `tests-source: qualio` against `test/stub-qualio.mjs`), and run the fixture and the stub locally (see the README).
 
 ## Releasing

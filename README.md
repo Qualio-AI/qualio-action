@@ -251,7 +251,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | --- | --- |
 | `playwright-version` | The `@playwright/test` version installed in the tests folder. |
 | `qualio-run-url` | The run's page in Qualio (the re-run's, after a heal). Empty when the results were not reported. |
-| `heal-status` | With `tests-source: qualio`, how healing a failed run ended: `patched`, `not_healable`, `stopped`, `failed`, `timeout` or `none`. Empty when the tests passed or weren't run. |
+| `heal-status` | With `tests-source: qualio`, how healing a failed run ended: `patched`, `proposed` (the project asks first: someone decides in Qualio), `declined`, `not_healable`, `stopped`, `failed`, `timeout` or `none`. Empty when the tests passed or weren't run. |
 
 ### What it does
 
@@ -272,6 +272,7 @@ With `tests-source: qualio` (projects whose **Where tests live** setting is *Qua
 1. The action downloads the tests for the branch (`POST /v1/tests/bundle`) into `$RUNNER_TEMP/qualio-e2e`: the main tests, plus heals Qualio made on this branch. Before Qualio has generated any tests, it logs a notice and runs nothing.
 2. It installs and runs them as above. The reporter writes the run id to a file so the action can follow the heal.
 3. If tests fail, it waits up to `heal-wait-minutes` for Qualio's verdict (`POST /v1/tests/heal/status`). When Qualio patched the tests, it downloads them again and re-runs them; the job's result is the re-run's. Real application bugs are never healed, so the job fails.
+   In projects set to **Ask me first** (the default), the verdict is `proposed`: the job fails at once with a link to the run, and the Analyst explains the UI change in the feature's chat. Accept it there (the tests, spec and knowledge base are updated) and re-run the workflow (Qualio dispatches it when its GitHub App is connected), or mark it as a bug and fix the application.
 4. When the pull request closes, the action tells Qualio (`POST /v1/tests/promote`): merged, the branch's heals become the main tests; closed without merging, they are dropped. Nothing is run.
 
 Run the tests on the target branch on demand with Qualio's **Run tests** (it dispatches the workflow). There's deliberately no `push` trigger: a merge's push would race the promotion of the pull request's heals.
@@ -293,11 +294,11 @@ Customers' workflows can only use the action once the repository is **public**. 
 1. **Settings → General → Danger Zone → Change visibility → Public**. Other organizations' workflows can only use actions from public repositories (or, on GitHub Enterprise, internal repositories that allow access).
 2. While it is private, repositories in the `Qualio-AI` organization (such as the school demo) can still use it: **Settings → Actions → General → Access → Accessible from repositories in the 'Qualio-AI' organization**.
 3. **Settings → Actions → General**: allow actions (needed for this repository's own `Test` and `Release` workflows). Under **Workflow permissions**, keep the default read permissions. The `Release` workflow asks for `contents: write` itself.
-4. Optional: protect `main` (**Settings → Branches**) and require the `lint`, `fixture`, `missing-folder` and `qualio-source` checks.
+4. Optional: protect `main` (**Settings → Branches**) and require the `lint`, `fixture`, `missing-folder`, `qualio-source` and `qualio-source-proposed` checks.
 
 ### 2. Check that the tests pass
 
-Pushing to `main` runs the **Test** workflow: actionlint, the action on `test/fixture` (with `uses: ./`), a run with a missing folder that must fail cleanly, and `tests-source: qualio` against the stub Qualio API (`test/stub-qualio.mjs`: fail, heal, re-run, pass). Open **Actions → Test** and make sure it is green before releasing.
+Pushing to `main` runs the **Test** workflow: actionlint, the action on `test/fixture` (with `uses: ./`), a run with a missing folder that must fail cleanly, and `tests-source: qualio` against the stub Qualio API (`test/stub-qualio.mjs`: fail, heal, re-run, pass; and a proposed heal that fails the job). Open **Actions → Test** and make sure it is green before releasing.
 
 ### 3. Release a version
 
@@ -361,7 +362,7 @@ To withdraw a bad release, move `v1` back to the previous good tag (`git tag -f 
 - `scripts/qualio.mjs`: the Qualio API calls of `tests-source: qualio` (download the tests, wait for the heal, keep or drop heals when a pull request closes). Node 20, no dependencies.
 - `test/fixture`: a stand-in for a generated tests folder (`@playwright/test` pinned to the same version as qualio-webapp).
 - `test/stub-qualio.mjs`: a stub of Qualio's CI API that serves a failing test, reports it healed, then serves the fixed one.
-- `.github/workflows/test.yml`: actionlint, the action on the fixture (`uses: ./`), the missing-folder failure path, and `tests-source: qualio` against the stub (fail, heal, re-run, pass).
+- `.github/workflows/test.yml`: actionlint, the action on the fixture (`uses: ./`), the missing-folder failure path, and `tests-source: qualio` against the stub (fail, heal, re-run, pass; and with `propose`, a proposed heal that fails the job without a re-run).
 - `.github/workflows/release.yml`: moves the major tag on each published release.
 
 Run the fixture locally:

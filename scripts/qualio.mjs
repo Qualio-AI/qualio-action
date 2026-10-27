@@ -93,7 +93,8 @@ async function wait(runFile, minutes) {
     const { status, body } = await call('/v1/tests/heal/status', { runId: run.runId });
     if (status !== 200) throw new Error(`Reading the heal status failed (${status}): ${body.error ?? 'unknown error'}`);
     if (body.status !== 'queued' && body.status !== 'running') {
-      console.log(`Heal: ${body.status}.`);
+      // proposed: the project asks first; a person accepts the change or calls it a bug in Qualio.
+      console.log(body.status === 'proposed' ? 'Heal: proposed. Qualio waits for someone to accept the UI change or mark it as a bug.' : `Heal: ${body.status}.`);
       return output({ status: body.status });
     }
     if (Date.now() >= deadline) {

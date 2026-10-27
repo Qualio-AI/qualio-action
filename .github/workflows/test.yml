@@ -78,3 +78,31 @@ jobs:
           test "$RUN_URL" = http://stub.test/runs/run_2
           routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).join(' ')")
           test "$routes" = "/v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status /v1/tests/bundle"
+
+  # tests-source: qualio when the project asks first: the heal ends "proposed", nothing is re-run,
+  # and the job fails until someone decides in Qualio.
+  qualio-source-proposed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API (Ask me first)
+        run: |
+          node test/stub-qualio.mjs 4555 propose &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: action
+        uses: ./
+        continue-on-error: true
+        with:
+          tests-source: qualio
+          api-key: qk_stub
+          api-url: http://localhost:4555
+          heal-wait-minutes: '1'
+      - name: The job failed with the proposal, without a re-run
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          HEAL: ${{ steps.action.outputs.heal-status }}
+        run: |
+          test "$OUTCOME" = failure
+          test "$HEAL" = proposed
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).join(' ')")
+          test "$routes" = "/v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status"
