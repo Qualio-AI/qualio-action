@@ -6,11 +6,14 @@ branding:
   color: purple
 
 inputs:
+  tests-source:
+    description: Where the tests come from. "repo" runs the tests folder in this repository (working-directory). "qualio" downloads the project's tests from Qualio for this branch, and re-runs them once Qualio has healed a failure.
+    default: repo
   working-directory:
-    description: The tests folder Qualio generates (holds package.json and playwright.config.ts).
+    description: The tests folder Qualio generates (holds package.json and playwright.config.ts). Only used with tests-source repo.
     default: e2e
   api-key:
-    description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, results are not reported.
+    description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, results are not reported (and tests-source qualio can't download the tests).
     required: true
   api-url:
     description: The Qualio URL that results are reported to (the generated workflow sets it).
@@ -21,6 +24,9 @@ inputs:
   commit-sha:
     description: The commit the results belong to.
     default: ${{ github.event.pull_request.head.sha || github.sha }}
+  heal-wait-minutes:
+    description: With tests-source qualio, how long to wait for Qualio to heal failed tests before giving up on the re-run.
+    default: '10'
   node-version:
     description: The Node.js version to run the tests with.
     default: '20'
@@ -36,62 +42,131 @@ outputs:
     description: The @playwright/test version installed in the tests folder.
     value: ${{ steps.playwright.outputs.version }}
   qualio-run-url:
-    description: The Qualio page of this run. Empty when the results were not reported.
+    description: The Qualio page of this run (of the re-run after a heal, when there was one). Empty when the results were not reported.
     value: ${{ steps.summary.outputs.run-url }}
+  heal-status:
+    description: With tests-source qualio, how healing a failed run ended (patched, not_healable, stopped, failed, timeout, none). Empty when the tests passed or weren't run.
+    value: ${{ steps.heal.outputs.status }}
 
 runs:
   using: composite
   steps:
     # Fail early with a readable message instead of an npm error. Only whether the key is set
     # reaches this step, never the key itself.
-    - name: Check the tests folder
+    - name: Check the inputs
+      id: check
       shell: bash
       env:
+        TESTS_SOURCE: ${{ inputs.tests-source }}
         TESTS_DIR: ${{ inputs.working-directory }}
         HAS_API_KEY: ${{ inputs.api-key != '' }}
         HAS_API_URL: ${{ inputs.api-url != '' }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
       run: |
-        rm -f "$RUNNER_TEMP/qualio-playwright.log"
-        if [ ! -d "$TESTS_DIR" ]; then
-          echo "::error title=Qualio::The tests folder '$TESTS_DIR' does not exist. Set the action's working-directory input to the folder Qualio generated (it holds package.json and playwright.config.ts), and check out the repository first with actions/checkout."
-          exit 1
+        rm -f "$RUNNER_TEMP/qualio-playwright.log" "$RUNNER_TEMP/qualio-run.json"
+        # A closed pull request has nothing to test: tests-source qualio only tells Qualio about it.
+        if [ "$EVENT_NAME" = "pull_request" ] && [ "$EVENT_ACTION" = "closed" ]; then
+          echo "closed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "closed=false" >> "$GITHUB_OUTPUT"
         fi
-        for file in package.json playwright.config.ts; do
-          if [ ! -f "$TESTS_DIR/$file" ]; then
-            echo "::error title=Qualio::'$TESTS_DIR/$file' is missing. Is working-directory the folder Qualio generated?"
+        case "$TESTS_SOURCE" in
+          repo)
+            if [ ! -d "$TESTS_DIR" ]; then
+              echo "::error title=Qualio::The tests folder '$TESTS_DIR' does not exist. Set the action's working-directory input to the folder Qualio generated (it holds package.json and playwright.config.ts), and check out the repository first with actions/checkout. If Qualio keeps this project's tests, set tests-source: qualio."
+              exit 1
+            fi
+            for file in package.json playwright.config.ts; do
+              if [ ! -f "$TESTS_DIR/$file" ]; then
+                echo "::error title=Qualio::'$TESTS_DIR/$file' is missing. Is working-directory the folder Qualio generated?"
+                exit 1
+              fi
+            done
+            if [ "$HAS_API_KEY" != "true" ] || [ "$HAS_API_URL" != "true" ]; then
+              echo "::warning title=Qualio::api-key or api-url is empty: the tests run, but results are not reported to Qualio and failures are not self-healed. Add the QUALIO_API_KEY repository secret."
+            fi
+            echo "dir=$TESTS_DIR" >> "$GITHUB_OUTPUT"
+            ;;
+          qualio)
+            if [ "$HAS_API_KEY" != "true" ] || [ "$HAS_API_URL" != "true" ]; then
+              echo "::error title=Qualio::tests-source qualio downloads the tests from Qualio, so api-key and api-url are required. Add the QUALIO_API_KEY repository secret."
+              exit 1
+            fi
+            echo "dir=$RUNNER_TEMP/qualio-e2e" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "::error title=Qualio::tests-source must be repo or qualio (got '$TESTS_SOURCE')."
             exit 1
-          fi
-        done
-        if [ "$HAS_API_KEY" != "true" ] || [ "$HAS_API_URL" != "true" ]; then
-          echo "::warning title=Qualio::api-key or api-url is empty: the tests run, but results are not reported to Qualio and failures are not self-healed. Add the QUALIO_API_KEY repository secret."
-        fi
+            ;;
+        esac
+
+    # Merged: the heals Qualio made on this branch become the main tests. Closed: they are dropped.
+    - name: Tell Qualio the pull request closed
+      if: steps.check.outputs.closed == 'true' && inputs.tests-source == 'qualio'
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        MERGED: ${{ github.event.pull_request.merged }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" promote "$GITHUB_HEAD_REF" "$MERGED" "$GITHUB_BASE_REF"
 
     - uses: actions/setup-node@v4
+      if: steps.check.outputs.closed != 'true'
       with:
         node-version: ${{ inputs.node-version }}
 
-    - name: Install dependencies
+    - name: Download the tests from Qualio
+      id: download
+      if: steps.check.outputs.closed != 'true' && inputs.tests-source == 'qualio'
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        TESTS_DIR: ${{ steps.check.outputs.dir }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" download "$TESTS_DIR" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+
+    # Whether there is anything to run: not on a closed pull request, nor before Qualio has tests.
+    - name: Decide whether to run
+      id: tests
+      shell: bash
+      env:
+        CLOSED: ${{ steps.check.outputs.closed }}
+        TESTS_SOURCE: ${{ inputs.tests-source }}
+        FOUND: ${{ steps.download.outputs.found }}
+      run: |
+        if [ "$CLOSED" = "true" ] || { [ "$TESTS_SOURCE" = "qualio" ] && [ "$FOUND" != "true" ]; }; then
+          echo "run=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "run=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install dependencies
+      if: steps.tests.outputs.run == 'true'
+      shell: bash
+      working-directory: ${{ steps.check.outputs.dir }}
       run: |
         if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
 
     - name: Read the Playwright version
       id: playwright
+      if: steps.tests.outputs.run == 'true'
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.check.outputs.dir }}
       run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
 
     - name: Cache Playwright browsers
       id: browsers
+      if: steps.tests.outputs.run == 'true'
       uses: actions/cache@v4
       with:
         path: ~/.cache/ms-playwright
         key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium
 
     - name: Install Chromium
+      if: steps.tests.outputs.run == 'true'
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.check.outputs.dir }}
       run: |
         if [ "${{ steps.browsers.outputs.cache-hit }}" = "true" ]; then
           npx playwright install-deps chromium
@@ -103,31 +178,66 @@ runs:
     # (E2E_<ROLE>_USERNAME / _PASSWORD) come from the calling job's env.
     # The output is also kept in a log so the summary can link to the Qualio run.
     # (shell: bash runs with pipefail, so a failing test still fails the step.)
+    # With tests-source qualio a failure doesn't stop the job here: the heal and re-run steps decide.
     - name: Run Playwright tests
       id: test
+      if: steps.tests.outputs.run == 'true'
+      continue-on-error: ${{ inputs.tests-source == 'qualio' }}
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.check.outputs.dir }}
       run: npx playwright test 2>&1 | tee "$RUNNER_TEMP/qualio-playwright.log"
       env:
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
         QUALIO_BASE_URL: ${{ inputs.base-url }}
         QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
+        QUALIO_RUN_FILE: ${{ runner.temp }}/qualio-run.json
+
+    - name: Wait for Qualio to heal the failures
+      id: heal
+      if: steps.test.outcome == 'failure' && inputs.tests-source == 'qualio'
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        WAIT_MINUTES: ${{ inputs.heal-wait-minutes }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" wait "$RUNNER_TEMP/qualio-run.json" "$WAIT_MINUTES"
+
+    # The fixed tests apply to this branch only; the re-run is reported to Qualio as round 2.
+    - name: Run the healed tests again
+      id: rerun
+      if: steps.heal.outputs.status == 'patched'
+      shell: bash
+      working-directory: ${{ steps.check.outputs.dir }}
+      run: |
+        node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" download . "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" > /dev/null
+        echo "::group::Re-run after Qualio's heal"
+        npx playwright test 2>&1 | tee -a "$RUNNER_TEMP/qualio-playwright.log"
+        echo "::endgroup::"
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
+        QUALIO_RUN_ROUND: '2'
 
     - uses: actions/upload-artifact@v4
-      if: ${{ !cancelled() && inputs.upload-report == 'true' }}
+      if: ${{ !cancelled() && inputs.upload-report == 'true' && steps.tests.outputs.run == 'true' }}
       with:
         name: playwright-report
-        path: ${{ inputs.working-directory }}/playwright-report
+        path: ${{ steps.check.outputs.dir }}/playwright-report
         retention-days: ${{ inputs.report-retention-days }}
         if-no-files-found: ignore
 
     - name: Summary
       id: summary
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && steps.check.outputs.closed != 'true' }}
       shell: bash
       env:
-        OUTCOME: ${{ steps.test.outcome }}
+        FIRST: ${{ steps.test.outcome }}
+        RERUN: ${{ steps.rerun.outcome }}
+        HEAL: ${{ steps.heal.outputs.status }}
+        TESTS_SOURCE: ${{ inputs.tests-source }}
         COMMIT_SHA: ${{ inputs.commit-sha }}
         UPLOAD_REPORT: ${{ inputs.upload-report }}
       run: |
@@ -139,12 +249,14 @@ runs:
           if grep -q '\[qualio\] Self-healing requested' "$log"; then healing=true; fi
         fi
         echo "run-url=$run_url" >> "$GITHUB_OUTPUT"
-        case "$OUTCOME" in
+        outcome="${RERUN:-$FIRST}"
+        case "$outcome" in
           success) result="✅ Passed" ;;
           failure) result="❌ Failed" ;;
-          skipped) result="⏭️ Not run (an earlier step failed)" ;;
-          *) result="$OUTCOME" ;;
+          skipped|"") result="⏭️ Not run" ;;
+          *) result="$outcome" ;;
         esac
+        if [ -n "$RERUN" ] && [ "$RERUN" != "skipped" ]; then result="$result (after Qualio healed the tests)"; fi
         {
           echo "### Qualio E2E"
           echo ""
@@ -152,16 +264,34 @@ runs:
           echo "| --- | --- |"
           echo "| Result | $result |"
           echo "| Commit | \`$COMMIT_SHA\` |"
+          if [ -n "$HEAL" ]; then echo "| Heal | $HEAL |"; fi
           if [ -n "$run_url" ]; then
             echo "| Qualio | [Open the run in Qualio]($run_url) |"
-          elif [ "$OUTCOME" != "skipped" ]; then
+          elif [ "$outcome" != "skipped" ] && [ -n "$outcome" ]; then
             echo "| Qualio | Not reported (see the \`[qualio]\` lines in the test log) |"
           fi
-          if [ "$UPLOAD_REPORT" = "true" ] && [ "$OUTCOME" != "skipped" ]; then
+          if [ "$UPLOAD_REPORT" = "true" ] && [ "$outcome" != "skipped" ] && [ -n "$outcome" ]; then
             echo "| HTML report | The \`playwright-report\` artifact of this workflow run |"
           fi
-          if [ -n "$healing" ]; then
+          if [ -n "$healing" ] && [ "$TESTS_SOURCE" = "repo" ]; then
             echo ""
             echo "Qualio is diagnosing the failures. Test drift is fixed with a \`[qualio-heal]\` commit on this pull request; real application bugs are reported, never healed."
+          elif [ "$HEAL" = "not_healable" ]; then
+            echo ""
+            echo "Qualio did not change the tests: the failures look like bugs in the application. See the run in Qualio."
           fi
         } >> "$GITHUB_STEP_SUMMARY"
+
+    # tests-source qualio: the job's result is the re-run's when there was one, else the first run's.
+    - name: Result
+      if: ${{ !cancelled() && inputs.tests-source == 'qualio' && steps.test.outcome == 'failure' }}
+      shell: bash
+      env:
+        RERUN: ${{ steps.rerun.outcome }}
+      run: |
+        if [ "$RERUN" = "success" ]; then
+          echo "The tests pass after Qualio healed them."
+        else
+          echo "::error title=Qualio::The E2E tests failed. See the job summary and the run in Qualio."
+          exit 1
+        fi

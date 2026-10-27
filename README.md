@@ -12,6 +12,16 @@ The tests run on your own GitHub Actions runner, inside your network, so Qualio 
     api-url: https://qualio.example.com   # your Qualio URL
 ```
 
+Projects that keep their tests in Qualio don't commit a tests folder at all: the action downloads the tests for the branch, and when Qualio heals a failure it runs them again in the same job.
+
+```yaml
+- uses: qualio-ai/qualio-action@v1
+  with:
+    tests-source: qualio
+    api-key: ${{ secrets.QUALIO_API_KEY }}
+    api-url: https://qualio.example.com
+```
+
 `https://qualio.example.com` stands for your Qualio address throughout this README.
 
 **Contents**
@@ -224,11 +234,13 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `working-directory` | `e2e` | The tests folder (holds `package.json` and `playwright.config.ts`). |
-| `api-key` | required | The Project API key, from the `QUALIO_API_KEY` secret. If empty, the tests still run but nothing is reported (with a warning). |
+| `tests-source` | `repo` | `repo`: run the tests folder in the repository. `qualio`: download the project's tests from Qualio for this branch (see [Tests served by Qualio](#tests-served-by-qualio)). |
+| `working-directory` | `e2e` | The tests folder (holds `package.json` and `playwright.config.ts`). Only with `tests-source: repo`. |
+| `api-key` | required | The Project API key, from the `QUALIO_API_KEY` secret. If empty, the tests still run but nothing is reported (with a warning); `tests-source: qualio` fails instead, since it can't download the tests. |
 | `api-url` | required | The Qualio URL that results are reported to. |
 | `base-url` | `''` | The environment under test. Empty uses the target URL in `playwright.config.ts`. |
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
+| `heal-wait-minutes` | `10` | With `tests-source: qualio`, how long to wait for Qualio's heal of a failed run before giving up on the re-run. |
 | `node-version` | `20` | The Node.js version. |
 | `upload-report` | `true` | Keep Playwright's HTML report as the `playwright-report` artifact. |
 | `report-retention-days` | `14` | Days to keep the report artifact. |
@@ -238,7 +250,8 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | Output | Description |
 | --- | --- |
 | `playwright-version` | The `@playwright/test` version installed in the tests folder. |
-| `qualio-run-url` | The run's page in Qualio. Empty when the results were not reported. |
+| `qualio-run-url` | The run's page in Qualio (the re-run's, after a heal). Empty when the results were not reported. |
+| `heal-status` | With `tests-source: qualio`, how healing a failed run ended: `patched`, `not_healable`, `stopped`, `failed`, `timeout` or `none`. Empty when the tests passed or weren't run. |
 
 ### What it does
 
@@ -251,6 +264,17 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 7. Writes a job summary with the result and a link to the run in Qualio.
 
 Test account secrets (`E2E_<ROLE>_…`) are not inputs: set them in the job's `env`, which the action's steps inherit. The action never prints the API key.
+
+### Tests served by Qualio
+
+With `tests-source: qualio` (projects whose **Where tests live** setting is *Qualio*), the repository only holds `.github/workflows/qualio.yml`, which Qualio's Getting started page gives you. The workflow should run on `pull_request` with `types: [opened, synchronize, reopened, closed]` and on `workflow_dispatch`.
+
+1. The action downloads the tests for the branch (`POST /v1/tests/bundle`) into `$RUNNER_TEMP/qualio-e2e`: the main tests, plus heals Qualio made on this branch. Before Qualio has generated any tests, it logs a notice and runs nothing.
+2. It installs and runs them as above. The reporter writes the run id to a file so the action can follow the heal.
+3. If tests fail, it waits up to `heal-wait-minutes` for Qualio's verdict (`POST /v1/tests/heal/status`). When Qualio patched the tests, it downloads them again and re-runs them; the job's result is the re-run's. Real application bugs are never healed, so the job fails.
+4. When the pull request closes, the action tells Qualio (`POST /v1/tests/promote`): merged, the branch's heals become the main tests; closed without merging, they are dropped. Nothing is run.
+
+Run the tests on the target branch on demand with Qualio's **Run tests** (it dispatches the workflow). There's deliberately no `push` trigger: a merge's push would race the promotion of the pull request's heals.
 
 ### Versioning
 
@@ -357,8 +381,10 @@ To withdraw a bad release, move `v1` back to the previous good tag (`git tag -f 
 ## Development
 
 - `action.yml`: the composite action. Steps use `shell: bash` and never echo secrets.
+- `scripts/qualio.mjs`: the Qualio API calls of `tests-source: qualio` (download the tests, wait for the heal, keep or drop heals when a pull request closes). Node 20, no dependencies.
 - `test/fixture`: a stand-in for a generated tests folder (`@playwright/test` pinned to the same version as qualio-webapp).
-- `.github/workflows/test.yml`: actionlint, the action on the fixture (`uses: ./`), and the missing-folder failure path.
+- `test/stub-qualio.mjs`: a stub of Qualio's CI API that serves a failing test, reports it healed, then serves the fixed one.
+- `.github/workflows/test.yml`: actionlint, the action on the fixture (`uses: ./`), the missing-folder failure path, and `tests-source: qualio` against the stub (fail, heal, re-run, pass).
 - `.github/workflows/release.yml`: moves the major tag on each published release.
 
 Run the fixture locally:
@@ -366,6 +392,16 @@ Run the fixture locally:
 ```sh
 cd test/fixture && npm install && npx playwright install chromium
 QUALIO_API_URL=http://qualio.test QUALIO_COMMIT_SHA=local E2E_ADMIN_USERNAME=admin@example.test npx playwright test
+```
+
+Check `tests-source: qualio` locally against the stub (the first run fails, the second passes after the "heal"):
+
+```sh
+node test/stub-qualio.mjs 4555 &
+export QUALIO_API_URL=http://localhost:4555 QUALIO_API_KEY=qk_stub QUALIO_POLL_MS=200
+node scripts/qualio.mjs download /tmp/qualio-e2e demo/x && cd /tmp/qualio-e2e && npm install
+QUALIO_RUN_FILE=/tmp/qualio-run.json npx playwright test; node "$OLDPWD/scripts/qualio.mjs" wait /tmp/qualio-run.json 1
+node "$OLDPWD/scripts/qualio.mjs" download . demo/x && QUALIO_RUN_ROUND=2 npx playwright test
 ```
 
 To run the workflows locally, use [act](https://github.com/nektos/act): `act -j fixture`.

@@ -7,17 +7,19 @@ The GitHub Action (composite, `action.yml`) that customers' `.github/workflows/q
 - **Workflow → action:** the Coder writes the workflow in `../qualio-webapp/packages/agents/src/coder/scaffold.ts` (`workflowFile()`, `QUALIO_ACTION_REF`). It passes `working-directory`, `api-key`, `api-url` and `base-url`, and puts the test account secrets (`E2E_<ROLE>_USERNAME/_PASSWORD`) in the job-level `env`, which this action's steps inherit.
 - **Action → reporter:** the generated tests folder carries `support/qualio-reporter.ts` (from `../qualio-webapp/packages/reporter`). It reports only when `QUALIO_API_URL` and `QUALIO_API_KEY` are set, and reads `QUALIO_COMMIT_SHA` (falling back to `GITHUB_SHA`) and the branch from `GITHUB_HEAD_REF`/`GITHUB_REF_NAME`. The generated `playwright.config.ts` reads `QUALIO_BASE_URL`.
 - **Dispatch:** Qualio's **Run tests** and post-heal re-runs dispatch the workflow file `qualio.yml` (`workflow_dispatch`).
+- **Tests served by Qualio (`tests-source: qualio`):** the workflow comes from `servedWorkflowFile()` in the same `scaffold.ts`. `scripts/qualio.mjs` calls `POST /v1/tests/bundle` (download), `/v1/tests/heal/status` (wait) and `/v1/tests/promote` (pull request closed). The action sets `QUALIO_RUN_FILE` (the reporter writes `{ runId, status, url, heal }` there) and `QUALIO_RUN_ROUND=2` for the re-run after a heal; the bundle's `.qualio-bundle.json` is sent by the reporter.
 - When you add or rename an input, update `workflowFile()` and its tests in qualio-webapp, the Getting Started page (`apps/web/src/app/docs/getting-started/page.tsx`) and this README.
 
 ## Rules
 
 - **Backwards compatible within `v1`:** customers' `qualio.yml` is never overwritten by Qualio, so old workflows must keep working. Only add optional inputs; breaking changes need `v2`.
 - **No secrets in logs:** never `echo` inputs; pass `api-key` to steps only through `env`.
-- **Composite only:** steps use `shell: bash` and `working-directory: ${{ inputs.working-directory }}`; third-party actions are pinned to a major version (`actions/*@v4`).
+- **Composite only:** steps use `shell: bash` and `working-directory: ${{ steps.check.outputs.dir }}` (the `working-directory` input, or the downloaded tests with `tests-source: qualio`); third-party actions are pinned to a major version (`actions/*@v4`).
 - **Never fail silently:** a failing test must fail the job; the HTML report upload runs `if: !cancelled()`.
 - **Playwright version:** browsers are cached per the tests folder's `@playwright/test` version. Keep `test/fixture` on the same version as qualio-webapp (`packages/reporter`, `docker/hosted-runner`).
 - **Steps:** a preflight checks the tests folder (and warns, without echoing it, when the key is empty); the test output is `tee`'d to `$RUNNER_TEMP/qualio-playwright.log` so the job summary and the `qualio-run-url` output can pick up the reporter's `[qualio] Results reported: <url>` line. Keep that log line format in step with `../qualio-webapp/packages/reporter`.
-- Check changes with the `Test` workflow (actionlint, `uses: ./` on `test/fixture`, and the missing-folder failure path), and run the fixture locally (see the README).
+- **Qualio mode never fails silently either:** the first run's step continues on error so the heal and re-run can follow, and the final `Result` step fails the job unless the re-run passed.
+- Check changes with the `Test` workflow (actionlint, `uses: ./` on `test/fixture`, the missing-folder failure path, and `tests-source: qualio` against `test/stub-qualio.mjs`), and run the fixture and the stub locally (see the README).
 
 ## Releasing
 

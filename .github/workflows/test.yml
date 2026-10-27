@@ -49,3 +49,32 @@ jobs:
         env:
           OUTCOME: ${{ steps.action.outcome }}
         run: test "$OUTCOME" = failure
+
+  # tests-source: qualio against a stub Qualio API: the downloaded test fails on a renamed button,
+  # the stub reports the heal as patched, and the re-run with the fixed test passes.
+  qualio-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API
+        run: |
+          node test/stub-qualio.mjs 4555 &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: action
+        uses: ./
+        with:
+          tests-source: qualio
+          api-key: qk_stub
+          api-url: http://localhost:4555
+          heal-wait-minutes: '1'
+      - name: The tests passed after the heal, in the same job
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          HEAL: ${{ steps.action.outputs.heal-status }}
+          RUN_URL: ${{ steps.action.outputs.qualio-run-url }}
+        run: |
+          test "$OUTCOME" = success
+          test "$HEAL" = patched
+          test "$RUN_URL" = http://stub.test/runs/run_2
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).join(' ')")
+          test "$routes" = "/v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status /v1/tests/bundle"
