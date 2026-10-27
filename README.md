@@ -63,16 +63,14 @@ Runner heals drift     ──── commit ──►    same PR, "[qualio-heal]"
 ### Step 1: Create the project
 
 1. In your workspace, choose **New project**.
-2. Pick the **target mode**:
-   - **Public URL:** Qualio can reach the app over the internet (e.g. `https://staging.example.com`). Qualio can crawl it and can also run tests itself (**Run in Qualio**), with or without GitHub.
-   - **Private (GitHub Actions):** the app is only reachable inside your network. The tests run only in your CI, through this action.
-3. **Private projects:** copy the **Project API key** shown after creation. It is shown only once (you can generate a new one later, see Step 4).
-4. The setup wizard continues with test accounts, the first crawl and a first test suite. Every step can be skipped and resumed from the project overview.
+2. Optionally give the **application URL in CI**: where the app runs inside your GitHub Actions job (default `http://localhost:3000`). Qualio never reaches your app itself: it is mapped and tested in your CI, by this action.
+3. Copy the **Project API key** shown after creation. It is shown only once (you can generate a new one later, see Step 4).
+4. The setup wizard continues with test accounts, the repository and the **setup pull request** (Step 3). Every step can be skipped and resumed from the project overview.
 5. In **Project settings**, write the **project overview**: what the app does, its main user journeys, domain terms and business rules. All agents read it first.
 
 ### Step 2: Add test accounts
 
-Under **Project settings → Test accounts**, add one account per role with its username and password. Qualio stores the passwords encrypted and uses them for crawling and hosted runs. In CI, each role becomes a pair of repository secrets:
+Under **Project settings → Test accounts**, add one account per role with its username and password. Qualio stores the passwords encrypted. In CI, where the app is mapped and tested, each role becomes a pair of repository secrets:
 
 | Role in Qualio | Secrets in GitHub |
 | --- | --- |
@@ -81,9 +79,15 @@ Under **Project settings → Test accounts**, add one account per role with its 
 
 (Upper case, with spaces and dashes turned into `_`. Projects without roles use `E2E_USERNAME` / `E2E_PASSWORD`.)
 
-### Step 3: Map the application
+### Step 3: The setup pull request maps the app and sets up the first test suite
 
-Open **Map → Start crawl**. Qualio opens the app in a browser, signed out and then as each role. It follows links but never submits forms, and it records each page's accessibility tree, form fields and verified locators. Each crawl adds a new version to the **Knowledge base**. For a Private app, Qualio cannot crawl it, so describe the pages in the project overview and feature chats instead.
+The wizard's **Open setup pull request** (after Step 4's GitHub connection) commits `.github/workflows/qualio.yml` to `qualio-bot/setup`. Edit its **Start the application** step so your app runs in the job, add the secrets (Step 5), and push. The workflow's **first run**:
+
+1. maps the application in the job with the mapper Qualio sends (signed out, then as each role; it follows links but never submits forms), and uploads each page's accessibility tree, form fields, verified locators and a screenshot to Qualio's **Knowledge base**;
+2. waits while Qualio plans the features, writes their specs (approved automatically) and writes the Playwright tests;
+3. runs those tests in the job. Tests that fail are repaired by Qualio and run again (up to 4 checks); tests that still fail are left out and listed, and a failure that looks like an application bug (server errors, error pages, missing controls) is never "repaired" into passing: it is left out and reported as a possible bug.
+
+The job passes once every delivered test has passed. The tests are then served to the action on every run (or, if they live in the repository, committed to the setup branch). This first run takes longer than later ones; the workflow allows 120 minutes.
 
 ### Step 4: Connect the GitHub repository
 
@@ -145,7 +149,7 @@ The runner always needs outbound HTTPS to Qualio (`QUALIO_API_URL`) to report re
 
 ### Step 7: Create your first feature
 
-Approve the **first test suite** the Planner proposed (Step 1's wizard, or the project overview), or create a feature yourself:
+After the first test suite (Step 3), create features yourself:
 
 1. **Features → New feature**: describe what users should be able to do. Features also arrive as **Tickets**, pasted, from Jira (**Project settings → Jira → Connect with Jira**) or from `POST /v1/tickets`.
 2. Answer the **Analyst's** clarifying questions in the feature chat.
@@ -240,6 +244,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `api-url` | required | The Qualio URL that results are reported to. |
 | `base-url` | `''` | The environment under test. Empty uses the target URL in `playwright.config.ts`. |
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
+| `setup-wait-minutes` | `100` | The first run (no test suite yet) maps the app and checks the generated tests in the job. How long that may take before the job gives up; a re-run continues where it stopped. |
 | `heal-wait-minutes` | `10` | With `tests-source: qualio`, how long to wait for Qualio's heal of a failed run before giving up on the re-run. |
 | `node-version` | `20` | The Node.js version. |
 | `upload-report` | `true` | Keep Playwright's HTML report as the `playwright-report` artifact. |
@@ -251,17 +256,19 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | --- | --- |
 | `playwright-version` | The `@playwright/test` version installed in the tests folder. |
 | `qualio-run-url` | The run's page in Qualio (the re-run's, after a heal). Empty when the results were not reported. |
+| `setup-state` | `ready` (the project already had its first suite) or `completed` (this job set it up). Empty when the setup didn't run (no `api-key`). |
 | `heal-status` | With `tests-source: qualio`, how healing a failed run ended: `patched`, `proposed` (the project asks first: someone decides in Qualio), `declined`, `not_healable`, `stopped`, `failed`, `timeout` or `none`. Empty when the tests passed or weren't run. |
 
 ### What it does
 
-1. Checks that `working-directory` holds a tests folder, and warns if `api-key` or `api-url` is empty.
-2. Sets up Node.js.
-3. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise).
-4. Installs Chromium and its system dependencies, caching the browser per Playwright version.
-5. Runs `npx playwright test` with `QUALIO_API_URL`, `QUALIO_API_KEY`, `QUALIO_BASE_URL` and `QUALIO_COMMIT_SHA` set. The generated `support/qualio-reporter.ts` uses them to report to Qualio and request self-healing. A failing test fails the job.
-6. Uploads Playwright's HTML report as the `playwright-report` artifact.
-7. Writes a job summary with the result and a link to the run in Qualio.
+1. Checks that `working-directory` holds a tests folder (on the setup pull request it may not exist yet), and warns if `api-key` or `api-url` is empty.
+2. Asks Qualio whether the project has a first test suite (`POST /v1/setup/start`). If not, sets it up in this job: runs the mapper Qualio sends, waits for the suite (`/v1/setup/:id/status`), and runs each check of it (`/v1/tests/bundle` with `suiteId`, `QUALIO_RUN_ROUND` = the check) until it is ready; the job then ends (`setup-state` output `completed`). Up to `setup-wait-minutes` (default 100).
+3. Sets up Node.js.
+4. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise).
+5. Installs Chromium and its system dependencies, caching the browser per Playwright version.
+6. Runs `npx playwright test` with `QUALIO_API_URL`, `QUALIO_API_KEY`, `QUALIO_BASE_URL` and `QUALIO_COMMIT_SHA` set. The generated `support/qualio-reporter.ts` uses them to report to Qualio and request self-healing. A failing test fails the job.
+7. Uploads Playwright's HTML report as the `playwright-report` artifact.
+8. Writes a job summary with the result and a link to the run in Qualio.
 
 Test account secrets (`E2E_<ROLE>_…`) are not inputs: set them in the job's `env`, which the action's steps inherit. The action never prints the API key.
 
@@ -359,10 +366,10 @@ To withdraw a bad release, move `v1` back to the previous good tag (`git tag -f 
 ## Development
 
 - `action.yml`: the composite action. Steps use `shell: bash` and never echo secrets.
-- `scripts/qualio.mjs`: the Qualio API calls of `tests-source: qualio` (download the tests, wait for the heal, keep or drop heals when a pull request closes). Node 20, no dependencies.
+- `scripts/qualio.mjs`: the Qualio API calls: `setup` (the first test suite: map, wait, check until ready), and for `tests-source: qualio`, download the tests, wait for the heal, keep or drop heals when a pull request closes. Node 20, no dependencies.
 - `test/fixture`: a stand-in for a generated tests folder (`@playwright/test` pinned to the same version as qualio-webapp).
 - `test/stub-qualio.mjs`: a stub of Qualio's CI API that serves a failing test, reports it healed, then serves the fixed one.
-- `.github/workflows/test.yml`: actionlint, the action on the fixture (`uses: ./`), the missing-folder failure path, and `tests-source: qualio` against the stub (fail, heal, re-run, pass; and with `propose`, a proposed heal that fails the job without a re-run).
+- `.github/workflows/test.yml`: actionlint, the action on the fixture (`uses: ./`), the missing-folder failure path, and `tests-source: qualio` against the stub (fail, heal, re-run, pass; with `propose`, a proposed heal that fails the job without a re-run; with `setup`, the first-suite setup: map, a failing check, a passing check, also with no tests folder in `repo` mode).
 - `.github/workflows/release.yml`: moves the major tag on each published release.
 
 Run the fixture locally:

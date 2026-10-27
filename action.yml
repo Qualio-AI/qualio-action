@@ -1,5 +1,5 @@
 name: Qualio E2E
-description: Run Qualio AI's generated Playwright tests and report results, failure artifacts and heal requests to Qualio.
+description: Set up Qualio AI's first test suite from inside your CI, then run the generated Playwright tests and report results, failure artifacts and heal requests to Qualio.
 author: Qualio AI
 branding:
   icon: check-circle
@@ -24,6 +24,9 @@ inputs:
   commit-sha:
     description: The commit the results belong to.
     default: ${{ github.event.pull_request.head.sha || github.sha }}
+  setup-wait-minutes:
+    description: The first run (no test suite yet) maps the application in this job and checks the generated tests here until they pass. How long it may take in all before the job gives up (a re-run continues where it stopped).
+    default: '100'
   heal-wait-minutes:
     description: With tests-source qualio, how long to wait for Qualio to heal failed tests before giving up on the re-run.
     default: '10'
@@ -47,6 +50,9 @@ outputs:
   heal-status:
     description: With tests-source qualio, how healing a failed run ended (patched, proposed, declined, not_healable, stopped, failed, timeout, none). Empty when the tests passed or weren't run.
     value: ${{ steps.heal.outputs.status }}
+  setup-state:
+    description: The first test suite's setup in this job (ready = the project already had one, completed = set up by this job). Empty when the setup didn't run (no api-key).
+    value: ${{ steps.setup.outputs.state }}
 
 runs:
   using: composite
@@ -73,6 +79,13 @@ runs:
         fi
         case "$TESTS_SOURCE" in
           repo)
+            # No tests folder yet is fine on the setup pull request: the first run sets up the suite
+            # and Qualio commits it to the branch. Checked again after the setup step.
+            if [ ! -d "$TESTS_DIR" ] && [ "$HAS_API_KEY" = "true" ] && [ "$HAS_API_URL" = "true" ]; then
+              echo "dir=$TESTS_DIR" >> "$GITHUB_OUTPUT"
+              echo "missing=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             if [ ! -d "$TESTS_DIR" ]; then
               echo "::error title=Qualio::The tests folder '$TESTS_DIR' does not exist. Set the action's working-directory input to the folder Qualio generated (it holds package.json and playwright.config.ts), and check out the repository first with actions/checkout. If Qualio keeps this project's tests, set tests-source: qualio."
               exit 1
@@ -116,9 +129,33 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
+    # Until the project has a first test suite that passed in CI, this job sets it up: the app (started
+    # by an earlier step of the job) is mapped here, Qualio generates the tests, and they are checked
+    # here until they all pass. Test account secrets come from the job's env, as for the tests.
+    - name: Set up the first test suite
+      id: setup
+      if: steps.check.outputs.closed != 'true' && inputs.api-key != '' && inputs.api-url != ''
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
+        WAIT_MINUTES: ${{ inputs.setup-wait-minutes }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" setup "$RUNNER_TEMP/qualio-setup" "$RUNNER_TEMP/qualio-map" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WAIT_MINUTES"
+
+    - name: Check the tests folder
+      if: steps.check.outputs.missing == 'true' && steps.setup.outputs.state == 'ready'
+      shell: bash
+      env:
+        TESTS_DIR: ${{ inputs.working-directory }}
+      run: |
+        echo "::error title=Qualio::The tests folder '$TESTS_DIR' does not exist. Set the action's working-directory input to the folder Qualio generated (it holds package.json and playwright.config.ts), and check out the repository first with actions/checkout. If Qualio keeps this project's tests, set tests-source: qualio."
+        exit 1
+
     - name: Download the tests from Qualio
       id: download
-      if: steps.check.outputs.closed != 'true' && inputs.tests-source == 'qualio'
+      if: steps.check.outputs.closed != 'true' && inputs.tests-source == 'qualio' && steps.setup.outputs.state != 'completed'
       shell: bash
       env:
         QUALIO_API_URL: ${{ inputs.api-url }}
@@ -126,7 +163,8 @@ runs:
         TESTS_DIR: ${{ steps.check.outputs.dir }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" download "$TESTS_DIR" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
 
-    # Whether there is anything to run: not on a closed pull request, nor before Qualio has tests.
+    # Whether there is anything to run: not on a closed pull request, nor before Qualio has tests, nor
+    # after this job set up the first suite (its last check already ran every test).
     - name: Decide whether to run
       id: tests
       shell: bash
@@ -134,8 +172,10 @@ runs:
         CLOSED: ${{ steps.check.outputs.closed }}
         TESTS_SOURCE: ${{ inputs.tests-source }}
         FOUND: ${{ steps.download.outputs.found }}
+        SETUP: ${{ steps.setup.outputs.state }}
+        MISSING: ${{ steps.check.outputs.missing }}
       run: |
-        if [ "$CLOSED" = "true" ] || { [ "$TESTS_SOURCE" = "qualio" ] && [ "$FOUND" != "true" ]; }; then
+        if [ "$CLOSED" = "true" ] || [ "$SETUP" = "completed" ] || [ "$MISSING" = "true" ] || { [ "$TESTS_SOURCE" = "qualio" ] && [ "$FOUND" != "true" ]; }; then
           echo "run=false" >> "$GITHUB_OUTPUT"
         else
           echo "run=true" >> "$GITHUB_OUTPUT"
@@ -240,7 +280,13 @@ runs:
         TESTS_SOURCE: ${{ inputs.tests-source }}
         COMMIT_SHA: ${{ inputs.commit-sha }}
         UPLOAD_REPORT: ${{ inputs.upload-report }}
+        SETUP: ${{ steps.setup.outputs.state }}
       run: |
+        # The setup step wrote its own summary.
+        if [ "$SETUP" = "completed" ]; then
+          echo "run-url=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         log="$RUNNER_TEMP/qualio-playwright.log"
         run_url=""
         healing=""
