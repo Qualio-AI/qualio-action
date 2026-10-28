@@ -157,7 +157,8 @@ http
       return res.end(JSON.stringify({ status: healed ? 'patched' : 'running' }));
     }
     if (req.url === '/v1/pr/sync') return res.end(JSON.stringify({ ok: true }));
-    if (req.url === '/v1/pr/outbox') return res.end(JSON.stringify({ items: outbox.filter((i) => !i.sent) }));
+    if (req.url === '/v1/pr/comment') return res.end(JSON.stringify(/^\/qualio /.test(body.body) ? { outcome: 'command', command: body.body.split(' ')[1] } : { outcome: 'answered' }));
+    if (req.url === '/v1/pr/outbox') return res.end(JSON.stringify({ items: outbox.filter((i) => !i.sent), waiting: false }));
     const ack = /^\/v1\/pr\/outbox\/(\w+)\/ack$/.exec(req.url);
     if (ack) {
       const item = outbox.find((i) => i.id === ack[1] && !i.sent);

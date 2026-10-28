@@ -6,6 +6,12 @@ branding:
   color: purple
 
 inputs:
+  command:
+    description: What the job does. "test" (default) runs the tests. "comment" (the workflow's comment job, on issue_comment) only tells Qualio about a new pull request comment, then posts Qualio's answer.
+    default: test
+  reply-wait-minutes:
+    description: With command comment, how long to wait for Qualio's answer (the Analyst's reply) before leaving it for the next job.
+    default: '3'
   tests-source:
     description: Where the tests come from. "qualio" downloads the project's tests from Qualio for this branch, and re-runs them once Qualio has healed a failure (Qualio now keeps every project's tests; its generated workflows set this). "repo" (deprecated, kept for workflows written before) runs a tests folder in this repository (working-directory).
     default: repo
@@ -72,9 +78,20 @@ runs:
         HAS_API_URL: ${{ inputs.api-url != '' }}
         EVENT_NAME: ${{ github.event_name }}
         EVENT_ACTION: ${{ github.event.action }}
+        COMMAND: ${{ inputs.command }}
       run: |
         rm -f "$RUNNER_TEMP/qualio-playwright.log" "$RUNNER_TEMP/qualio-run.json"
         # A closed pull request has nothing to test: tests-source qualio only tells Qualio about it.
+        # Neither has the comment job, which only relays a comment.
+        if [ "$COMMAND" = "comment" ]; then
+          if [ "$HAS_API_KEY" != "true" ] || [ "$HAS_API_URL" != "true" ]; then
+            echo "::error title=Qualio::The comment job needs api-key and api-url. Add the QUALIO_API_KEY repository secret."
+            exit 1
+          fi
+          echo "closed=true" >> "$GITHUB_OUTPUT"
+          echo "comment=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         if [ "$EVENT_NAME" = "pull_request" ] && [ "$EVENT_ACTION" = "closed" ]; then
           echo "closed=true" >> "$GITHUB_OUTPUT"
         else
@@ -120,13 +137,22 @@ runs:
     # Qualio follows pull requests through this job (title, description, branch, head, merged); it
     # never reads the repository. Never fails the job.
     - name: Tell Qualio about the pull request
-      if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && inputs.api-key != '' && inputs.api-url != ''
+      if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && inputs.command != 'comment' && inputs.api-key != '' && inputs.api-url != ''
       continue-on-error: true
       shell: bash
       env:
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" sync
+
+    # The comment job: a reply to the Analyst or a /qualio command, relayed to Qualio (no checkout).
+    - name: Tell Qualio about the comment
+      if: steps.check.outputs.comment == 'true'
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" comment
 
     # Comments, statuses, labels and re-runs Qualio queued for GitHub, sent with this job's token.
     - name: Send Qualio's GitHub updates
@@ -141,7 +167,7 @@ runs:
 
     # Merged: the heals Qualio made on this branch become the main tests. Closed: they are dropped.
     - name: Tell Qualio the pull request closed
-      if: steps.check.outputs.closed == 'true' && inputs.tests-source == 'qualio'
+      if: steps.check.outputs.closed == 'true' && steps.check.outputs.comment != 'true' && inputs.tests-source == 'qualio'
       shell: bash
       env:
         QUALIO_API_URL: ${{ inputs.api-url }}
@@ -380,7 +406,9 @@ runs:
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" outbox
+        # The comment job waits for Qualio's answer, so it's posted now rather than by the next job.
+        WAIT_MINUTES: ${{ steps.check.outputs.comment == 'true' && inputs.reply-wait-minutes || '0' }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" outbox "$WAIT_MINUTES"
 
     # tests-source qualio: the job's result is the re-run's when there was one, else the first run's.
     - name: Result

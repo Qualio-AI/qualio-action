@@ -249,6 +249,8 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `node-version` | `20` | The Node.js version. |
 | `upload-report` | `true` | Keep Playwright's HTML report as the `playwright-report` artifact. |
 | `report-retention-days` | `14` | Days to keep the report artifact. |
+| `command` | `test` | `test` runs the tests. `comment` is for the workflow's `comment` job (on `issue_comment`): it only tells Qualio about a new pull request comment (`POST /v1/pr/comment`), then posts Qualio's answer. |
+| `reply-wait-minutes` | `3` | With `command: comment`, how long to wait for Qualio's answer before leaving it for the next job. |
 | `github-token` | `${{ github.token }}` | Sends the pull request comments, statuses, labels and re-runs Qualio queued for GitHub (when its GitHub App isn't installed or lacks the permission). The workflow needs `permissions` `issues: write`, `statuses: write` and `actions: write`. Empty sends nothing. |
 
 ### Outputs
@@ -275,7 +277,7 @@ Test account secrets (`E2E_<ROLE>_…`) are not inputs: set them in the job's `e
 
 ### Tests served by Qualio
 
-With `tests-source: qualio` (every Qualio project: Qualio keeps the tests), the repository only holds `.github/workflows/qualio.yml`, which Qualio's Getting started page gives you. The workflow should run on `pull_request` with `types: [opened, synchronize, reopened, closed]` and on `workflow_dispatch`.
+With `tests-source: qualio` (every Qualio project: Qualio keeps the tests), the repository only holds `.github/workflows/qualio.yml`, which Qualio's Getting started page gives you. The workflow should run on `pull_request` with `types: [opened, synchronize, reopened, closed]`, on `issue_comment` (`types: [created]`, for the `comment` job) and on `workflow_dispatch`.
 
 1. The action downloads the tests for the branch (`POST /v1/tests/bundle`) into `$RUNNER_TEMP/qualio-e2e`: the main tests, plus heals Qualio made on this branch. Before Qualio has generated any tests, it logs a notice and runs nothing.
 2. It installs and runs them as above. The reporter writes the run id to a file so the action can follow the heal.
@@ -285,6 +287,7 @@ With `tests-source: qualio` (every Qualio project: Qualio keeps the tests), the 
 5. On every pull request event the action first tells Qualio what the pull request is (`POST /v1/pr/sync`: number, title, description, branch, head commit, merged, and the names of test account secrets that were empty). This is how Qualio follows pull requests; it never reads the repository.
 6. At the start and end of every job it sends what Qualio queued for GitHub (`POST /v1/pr/outbox`, then `POST /v1/pr/outbox/:id/ack` per item) with `github-token`: pull request comments, commit statuses, labels and `workflow_dispatch` re-runs. Missing token permissions only print a warning; the items wait for the next job.
 7. A job that fails before the reporter sent results tells Qualio (`POST /v1/runs/errored`), so the run shows as errored at once.
+8. The workflow's `comment` job runs on `issue_comment` with `command: comment`, without a checkout: it sends a person's new pull request comment to Qualio (`POST /v1/pr/comment`), a reply to the Analyst or a `/qualio accept`, `/qualio bug` or `/qualio run` command, and posts Qualio's answer from the outbox. The Qualio GitHub App has no Pull requests permission (it would expose diffs), so pull request conversations always go through the workflow.
 
 Run the tests on the target branch on demand with Qualio's **Run tests** (it dispatches the workflow). There's deliberately no `push` trigger: a merge's push would race the promotion of the pull request's heals.
 

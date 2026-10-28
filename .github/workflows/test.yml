@@ -162,3 +162,28 @@ jobs:
         run: |
           test "$OUTCOME" = success
           test "$SETUP" = completed
+
+  # The comment job (command: comment) never installs or runs tests, nor tells Qualio a pull request
+  # closed; outside an issue_comment event it relays nothing.
+  comment-command:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API
+        run: |
+          node test/stub-qualio.mjs 4555 &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: action
+        uses: ./
+        with:
+          command: comment
+          api-key: qk_stub
+          api-url: http://localhost:4555
+          reply-wait-minutes: '0'
+      - name: Only the outbox was read
+        env:
+          PLAYWRIGHT_VERSION: ${{ steps.action.outputs.playwright-version }}
+        run: |
+          test -z "$PLAYWRIGHT_VERSION"
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => !r.startsWith('/repos/')).join(' ')")
+          test "$routes" = "/v1/pr/outbox /v1/pr/outbox"

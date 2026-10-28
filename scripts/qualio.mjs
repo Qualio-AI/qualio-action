@@ -7,8 +7,9 @@
 //   node qualio.mjs promote <branch> <merged> [base]  a closed pull request: keep or drop its heals
 //   node qualio.mjs wait <run-file> <minutes>    waits for the heal of the run the reporter wrote
 //   node qualio.mjs sync                         tells Qualio about this pull request (title, branch, head, merged)
-//   node qualio.mjs outbox                       sends what Qualio queued for GitHub (comments, statuses,
-//                                                dispatches, labels) with GITHUB_TOKEN
+//   node qualio.mjs outbox [wait-minutes]        sends what Qualio queued for GitHub (comments, statuses,
+//                                                dispatches, labels) with GITHUB_TOKEN; waits for answers
+//   node qualio.mjs comment                      relays a new pull request comment to Qualio (comment job)
 //   node qualio.mjs errored <conclusion>         this job failed before reporting results
 //
 // Reads QUALIO_API_URL and QUALIO_API_KEY (and GITHUB_TOKEN for outbox) from the environment and never prints them. Step
@@ -295,17 +296,11 @@ async function deliver(item) {
   }
 }
 
-/**
- * Sends what Qualio couldn't send to GitHub itself (no GitHub App, or one without the permission)
- * with this job's GITHUB_TOKEN. Never fails the job: what can't be sent now waits for the next job.
- */
-async function outbox() {
-  if (!process.env.GITHUB_TOKEN || !process.env.GITHUB_REPOSITORY) return;
-  const { status, body } = await call('/v1/pr/outbox', {});
-  if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
+/** Sends one batch of outbox items. Returns how many were sent and whether GitHub refused the token. */
+async function sendBatch(items) {
   let sent = 0;
   let denied = false;
-  for (const item of body.items) {
+  for (const item of items) {
     const failed = await deliver(item);
     // Missing token permissions, rate limits and GitHub outages are retried by the next job.
     if (failed && (failed.status === 0 || failed.status === 403 || failed.status === 429 || failed.status >= 500)) {
@@ -317,9 +312,53 @@ async function outbox() {
     if (!failed) sent += 1;
     else console.log(`GitHub refused an update (${item.kind}, ${failed.status}): ${failed.message}`);
   }
+  return { sent, denied };
+}
+
+/**
+ * Sends what Qualio couldn't send to GitHub itself (no GitHub App, or one without the permission)
+ * with this job's GITHUB_TOKEN. With `waitMinutes`, keeps polling while Qualio says an agent is still
+ * answering (a reply to the Analyst), so the answer is posted by this job. Never fails the job: what
+ * can't be sent now waits for the next job.
+ */
+async function outbox(waitMinutes = '0') {
+  if (!process.env.GITHUB_TOKEN || !process.env.GITHUB_REPOSITORY) return;
+  const deadline = Date.now() + Number(waitMinutes || 0) * 60_000;
+  let sent = 0;
+  let denied = false;
+  let quiet = 0;
+  for (;;) {
+    const { status, body } = await call('/v1/pr/outbox', {});
+    if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
+    const batch = await sendBatch(body.items);
+    sent += batch.sent;
+    denied ||= batch.denied;
+    // Done when nothing is left and nobody is answering (twice: the answer's comment is queued just after).
+    quiet = body.items.length === 0 && !body.waiting ? quiet + 1 : 0;
+    if (Date.now() >= deadline || quiet >= 2 || denied) break;
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
   if (sent) console.log(`Sent ${sent} update(s) from Qualio to GitHub.`);
   if (denied)
-    console.log("::warning title=Qualio::This job's GITHUB_TOKEN may not write comments, statuses or dispatch workflows. Add to the workflow: permissions: { contents: read, pull-requests: read, issues: write, statuses: write, actions: write }.");
+    console.log("::warning title=Qualio::This job's GITHUB_TOKEN may not write comments, statuses or dispatch workflows. Add to the workflow: permissions: { contents: read, pull-requests: write, issues: write, statuses: write, actions: write }.");
+}
+
+/**
+ * The comment job: tells Qualio about a new comment on a pull request (a reply to the Analyst, or a
+ * `/qualio accept|bug|run` command). Comments on issues, by bots, or Qualio's own are skipped.
+ */
+async function comment() {
+  if (process.env.GITHUB_EVENT_NAME !== 'issue_comment') return;
+  const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
+  if (event.action !== 'created' || !event.issue?.pull_request || event.comment.user.type === 'Bot') return console.log('Not a person\'s new comment on a pull request: nothing to tell Qualio.');
+  const { status, body } = await call('/v1/pr/comment', {
+    number: event.issue.number,
+    commentId: event.comment.id,
+    body: event.comment.body ?? '',
+    user: { id: event.comment.user.id, login: event.comment.user.login, type: event.comment.user.type },
+  });
+  if (status !== 200) return console.log(`::warning title=Qualio::Qualio could not read the comment (${status}): ${body.error ?? 'unknown error'}`);
+  console.log(body.outcome === 'ignored' ? `Qualio skipped the comment: ${body.reason}.` : `Qualio received the comment (${body.command ?? body.outcome}).`);
 }
 
 /** This job failed before the reporter sent results: the run shows as errored in Qualio right away. */
@@ -338,9 +377,9 @@ async function errored(conclusion) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-const commands = { setup, download, promote, wait, sync, outbox, errored };
+const commands = { setup, download, promote, wait, sync, outbox, errored, comment };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use setup, download, promote, wait, sync, outbox or errored.`);
+  console.error(`Unknown command "${command}". Use setup, download, promote, wait, sync, outbox, errored or comment.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {
