@@ -249,6 +249,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `node-version` | `20` | The Node.js version. |
 | `upload-report` | `true` | Keep Playwright's HTML report as the `playwright-report` artifact. |
 | `report-retention-days` | `14` | Days to keep the report artifact. |
+| `github-token` | `${{ github.token }}` | Sends the pull request comments, statuses, labels and re-runs Qualio queued for GitHub (when its GitHub App isn't installed or lacks the permission). The workflow needs `permissions` `issues: write`, `statuses: write` and `actions: write`. Empty sends nothing. |
 
 ### Outputs
 
@@ -281,6 +282,9 @@ With `tests-source: qualio` (every Qualio project: Qualio keeps the tests), the 
 3. If tests fail, it waits up to `heal-wait-minutes` for Qualio's verdict (`POST /v1/tests/heal/status`). When Qualio patched the tests, it downloads them again and re-runs them; the job's result is the re-run's. Real application bugs are never healed, so the job fails.
    In projects set to **Ask me first** (the default), the verdict is `proposed`: the job fails at once with a link to the run, and the Analyst explains the UI change in the feature's chat. Accept it there (the tests, spec and knowledge base are updated) and re-run the workflow (Qualio dispatches it when its GitHub App is connected), or mark it as a bug and fix the application.
 4. When the pull request closes, the action tells Qualio (`POST /v1/tests/promote`): merged, the branch's heals become the main tests; closed without merging, they are dropped. Nothing is run.
+5. On every pull request event the action first tells Qualio what the pull request is (`POST /v1/pr/sync`: number, title, description, branch, head commit, merged, and the names of test account secrets that were empty). This is how Qualio follows pull requests; it never reads the repository.
+6. At the start and end of every job it sends what Qualio queued for GitHub (`POST /v1/pr/outbox`, then `POST /v1/pr/outbox/:id/ack` per item) with `github-token`: pull request comments, commit statuses, labels and `workflow_dispatch` re-runs. Missing token permissions only print a warning; the items wait for the next job.
+7. A job that fails before the reporter sent results tells Qualio (`POST /v1/runs/errored`), so the run shows as errored at once.
 
 Run the tests on the target branch on demand with Qualio's **Run tests** (it dispatches the workflow). There's deliberately no `push` trigger: a merge's push would race the promotion of the pull request's heals.
 

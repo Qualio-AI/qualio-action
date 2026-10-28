@@ -6,8 +6,12 @@
 //   node qualio.mjs download <dir> <branch>      writes the branch's tests into <dir>
 //   node qualio.mjs promote <branch> <merged> [base]  a closed pull request: keep or drop its heals
 //   node qualio.mjs wait <run-file> <minutes>    waits for the heal of the run the reporter wrote
+//   node qualio.mjs sync                         tells Qualio about this pull request (title, branch, head, merged)
+//   node qualio.mjs outbox                       sends what Qualio queued for GitHub (comments, statuses,
+//                                                dispatches, labels) with GITHUB_TOKEN
+//   node qualio.mjs errored <conclusion>         this job failed before reporting results
 //
-// Reads QUALIO_API_URL and QUALIO_API_KEY from the environment and never prints the key. Step
+// Reads QUALIO_API_URL and QUALIO_API_KEY (and GITHUB_TOKEN for outbox) from the environment and never prints them. Step
 // outputs go to $GITHUB_OUTPUT when it is set.
 import { spawn } from 'node:child_process';
 import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -217,10 +221,126 @@ async function wait(runFile, minutes) {
   }
 }
 
+async function sync() {
+  if (!['pull_request', 'pull_request_target'].includes(process.env.GITHUB_EVENT_NAME)) return;
+  const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
+  const pr = event.pull_request;
+  // Names only, never values: the job's test account variables whose secret is missing.
+  const emptySecrets = Object.entries(process.env)
+    .filter(([name, value]) => /^E2E_[A-Z0-9_]+_(USERNAME|PASSWORD)$/.test(name) && !value)
+    .map(([name]) => name)
+    .sort();
+  const { status, body } = await call('/v1/pr/sync', {
+    action: event.action,
+    number: pr.number,
+    title: pr.title ?? '',
+    body: pr.body ?? null,
+    url: pr.html_url,
+    branch: pr.head.ref,
+    baseBranch: pr.base.ref,
+    headSha: pr.head.sha,
+    merged: Boolean(pr.merged),
+    emptySecrets,
+  });
+  if (status !== 200) return console.log(`::warning title=Qualio::Qualio could not record pull request #${pr.number} (${status}): ${body.error ?? 'unknown error'}`);
+  console.log(`Qualio recorded pull request #${pr.number} (${event.action}).`);
+  if (emptySecrets.length) console.log(`::warning title=Qualio::These test account secrets are empty, so tests that sign in as those roles will fail: ${emptySecrets.join(', ')}. Add them in Settings → Secrets and variables → Actions.`);
+}
+
+/** One GitHub REST call with the job's token. Returns the HTTP status (0 when GitHub couldn't be reached). */
+async function github(method, route, body) {
+  const base = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}${route}`, {
+      method,
+      headers: { authorization: `Bearer ${process.env.GITHUB_TOKEN}`, accept: 'application/vnd.github+json', 'content-type': 'application/json', 'x-github-api-version': '2022-11-28' },
+      body: body && JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const text = await res.text();
+    return { status: res.status, message: res.ok ? '' : (() => { try { return JSON.parse(text).message; } catch { return text.slice(0, 200); } })() };
+  } catch (error) {
+    return { status: 0, message: error.message };
+  }
+}
+
+/** Sends one outbox item. Returns the GitHub call that failed, if one did. */
+async function deliver(item) {
+  const repo = `/repos/${process.env.GITHUB_REPOSITORY}`;
+  const p = item.payload;
+  const ok = (r) => (r.status >= 200 && r.status < 300 ? null : r);
+  switch (item.kind) {
+    case 'COMMENT':
+      return ok(await github('POST', `${repo}/issues/${item.prNumber}/comments`, { body: p.body }));
+    case 'STATUS':
+      return ok(await github('POST', `${repo}/statuses/${item.sha}`, { state: p.state, context: p.context, description: p.description?.slice(0, 140), target_url: p.targetUrl }));
+    case 'DISPATCH': {
+      // This workflow's own file (owner/repo/.github/workflows/qualio.yml@refs/...), qualio.yml by default.
+      const file = /\/([^/@]+\.ya?ml)@/.exec(process.env.GITHUB_WORKFLOW_REF ?? '')?.[1] ?? 'qualio.yml';
+      return ok(await github('POST', `${repo}/actions/workflows/${file}/dispatches`, { ref: p.ref }));
+    }
+    case 'LABEL': {
+      if (p.add?.length) {
+        const failed = ok(await github('POST', `${repo}/issues/${item.prNumber}/labels`, { labels: p.add }));
+        if (failed) return failed;
+      }
+      for (const name of p.remove ?? []) {
+        const r = await github('DELETE', `${repo}/issues/${item.prNumber}/labels/${encodeURIComponent(name)}`);
+        if (r.status !== 404 && ok(r)) return r;
+      }
+      return null;
+    }
+    default:
+      return { status: 400, message: `unknown item kind ${item.kind}` };
+  }
+}
+
+/**
+ * Sends what Qualio couldn't send to GitHub itself (no GitHub App, or one without the permission)
+ * with this job's GITHUB_TOKEN. Never fails the job: what can't be sent now waits for the next job.
+ */
+async function outbox() {
+  if (!process.env.GITHUB_TOKEN || !process.env.GITHUB_REPOSITORY) return;
+  const { status, body } = await call('/v1/pr/outbox', {});
+  if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
+  let sent = 0;
+  let denied = false;
+  for (const item of body.items) {
+    const failed = await deliver(item);
+    // Missing token permissions, rate limits and GitHub outages are retried by the next job.
+    if (failed && (failed.status === 0 || failed.status === 403 || failed.status === 429 || failed.status >= 500)) {
+      denied ||= failed.status === 403;
+      console.log(`Not sent yet (${item.kind}, GitHub ${failed.status || 'unreachable'}): ${failed.message}`);
+      continue;
+    }
+    await call(`/v1/pr/outbox/${item.id}/ack`, { error: failed ? `GitHub ${failed.status}: ${failed.message}` : null });
+    if (!failed) sent += 1;
+    else console.log(`GitHub refused an update (${item.kind}, ${failed.status}): ${failed.message}`);
+  }
+  if (sent) console.log(`Sent ${sent} update(s) from Qualio to GitHub.`);
+  if (denied)
+    console.log("::warning title=Qualio::This job's GITHUB_TOKEN may not write comments, statuses or dispatch workflows. Add to the workflow: permissions: { contents: read, pull-requests: read, issues: write, statuses: write, actions: write }.");
+}
+
+/** This job failed before the reporter sent results: the run shows as errored in Qualio right away. */
+async function errored(conclusion) {
+  const { GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_SERVER_URL, GITHUB_REPOSITORY } = process.env;
+  if (!GITHUB_RUN_ID || !GITHUB_REPOSITORY) return;
+  const { status, body } = await call('/v1/runs/errored', {
+    ghRunId: GITHUB_RUN_ID,
+    runAttempt: Number(GITHUB_RUN_ATTEMPT || 1),
+    branch: process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME,
+    headSha: process.env.QUALIO_COMMIT_SHA || process.env.GITHUB_SHA,
+    conclusion: conclusion || 'failure',
+    url: `${GITHUB_SERVER_URL || 'https://github.com'}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`,
+  });
+  if (status !== 200) console.log(`::warning title=Qualio::Could not tell Qualio this job failed (${status}): ${body.error ?? 'unknown error'}`);
+}
+
 const [command, ...args] = process.argv.slice(2);
-const commands = { setup, download, promote, wait };
+const commands = { setup, download, promote, wait, sync, outbox, errored };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use setup, download, promote or wait.`);
+  console.error(`Unknown command "${command}". Use setup, download, promote, wait, sync, outbox or errored.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {

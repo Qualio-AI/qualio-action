@@ -76,7 +76,9 @@ jobs:
           test "$OUTCOME" = success
           test "$HEAL" = patched
           test "$RUN_URL" = http://stub.test/runs/run_2
-          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).join(' ')")
+          outbox=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).filter((c) => c.route === '/v1/pr/outbox').length")
+          test "$outbox" = 2
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => !r.startsWith('/v1/pr/')).join(' ')")
           test "$routes" = "/v1/setup/start /v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status /v1/tests/bundle"
 
   # tests-source: qualio when the project asks first: the heal ends "proposed", nothing is re-run,
@@ -104,7 +106,7 @@ jobs:
         run: |
           test "$OUTCOME" = failure
           test "$HEAL" = proposed
-          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).join(' ')")
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => !r.startsWith('/v1/pr/')).join(' ')")
           test "$routes" = "/v1/setup/start /v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status"
 
   # A project without a first test suite: the job maps the app with Qualio's mapper, then checks the
@@ -133,7 +135,7 @@ jobs:
         run: |
           test "$OUTCOME" = success
           test "$SETUP" = completed
-          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r !== '/v1/setup/s1/status').join(' ')")
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r !== '/v1/setup/s1/status' && !r.startsWith('/v1/pr/')).join(' ')")
           test "$routes" = "/v1/setup/start /v1/setup/s1/mapped /v1/tests/bundle /v1/runs /v1/tests/bundle /v1/runs"
 
   # Tests kept in the repository, on the setup pull request: no tests folder yet is not an error.

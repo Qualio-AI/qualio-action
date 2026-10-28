@@ -39,6 +39,9 @@ inputs:
   report-retention-days:
     description: Days to keep the HTML report artifact.
     default: '14'
+  github-token:
+    description: The token that sends Qualio's pull request comments, statuses, labels and re-runs when the Qualio GitHub App can't (not installed, or without the permission). The workflow needs `permissions` issues, statuses and actions write for them. Empty sends nothing.
+    default: ${{ github.token }}
 
 outputs:
   playwright-version:
@@ -113,6 +116,28 @@ runs:
             exit 1
             ;;
         esac
+
+    # Qualio follows pull requests through this job (title, description, branch, head, merged); it
+    # never reads the repository. Never fails the job.
+    - name: Tell Qualio about the pull request
+      if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && inputs.api-key != '' && inputs.api-url != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" sync
+
+    # Comments, statuses, labels and re-runs Qualio queued for GitHub, sent with this job's token.
+    - name: Send Qualio's GitHub updates
+      if: inputs.api-key != '' && inputs.api-url != '' && inputs.github-token != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" outbox
 
     # Merged: the heals Qualio made on this branch become the main tests. Closed: they are dropped.
     - name: Tell Qualio the pull request closed
@@ -333,6 +358,29 @@ runs:
             echo "This UI change was marked as a bug in Qualio, so the tests were not changed. Fix the application."
           fi
         } >> "$GITHUB_STEP_SUMMARY"
+
+    # The job failed before any results reached Qualio (dependencies, the tests didn't start…): the
+    # run shows as errored in Qualio at once. A setup has its own state, so it is left out.
+    - name: Tell Qualio the job failed
+      if: failure() && inputs.api-key != '' && inputs.api-url != '' && steps.check.outputs.closed != 'true' && steps.setup.outcome != 'failure' && steps.summary.outputs.run-url == ''
+      continue-on-error: true
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" errored failure
+
+    # Again at the end: what Qualio queued during this job (heal reports, regressions) goes out now.
+    - name: Send Qualio's GitHub updates (end of job)
+      if: ${{ !cancelled() && inputs.api-key != '' && inputs.api-url != '' && inputs.github-token != '' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" outbox
 
     # tests-source qualio: the job's result is the re-run's when there was one, else the first run's.
     - name: Result
