@@ -182,6 +182,8 @@ async function promote(branch, merged, baseBranch) {
   const { status, body } = await call('/v1/tests/promote', { branch, merged: merged === 'true', baseBranch: baseBranch || null });
   if (status !== 200) throw new Error(`Telling Qualio the pull request closed failed (${status}): ${body.error ?? 'unknown error'}`);
   if (merged !== 'true') console.log(`Dropped ${body.discarded} heal(s) made on ${branch}.`);
+  else if (body.held)
+    console.log(`::warning title=Qualio::The latest run on ${branch} did not pass, so its tests were not added to the main tests. Promote or discard them on the pull request's page in Qualio.`);
   else {
     console.log(body.promoted.length ? `Qualio's heals from ${branch} are now the main tests: ${body.promoted.join(', ')}.` : `No heals were made on ${branch}.`);
     if (body.skipped.length) console.log(`::warning title=Qualio::Not applied because the main tests changed them since: ${body.skipped.join(', ')}.`);
