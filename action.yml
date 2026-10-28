@@ -7,10 +7,10 @@ branding:
 
 inputs:
   tests-source:
-    description: Where the tests come from. "repo" runs the tests folder in this repository (working-directory). "qualio" downloads the project's tests from Qualio for this branch, and re-runs them once Qualio has healed a failure.
+    description: Where the tests come from. "qualio" downloads the project's tests from Qualio for this branch, and re-runs them once Qualio has healed a failure (Qualio now keeps every project's tests; its generated workflows set this). "repo" (deprecated, kept for workflows written before) runs a tests folder in this repository (working-directory).
     default: repo
   working-directory:
-    description: The tests folder Qualio generates (holds package.json and playwright.config.ts). Only used with tests-source repo.
+    description: Deprecated. The tests folder in this repository (holds package.json and playwright.config.ts). Only used with tests-source repo.
     default: e2e
   api-key:
     description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, results are not reported (and tests-source qualio can't download the tests).

@@ -238,8 +238,8 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `tests-source` | `repo` | `repo`: run the tests folder in the repository. `qualio`: download the project's tests from Qualio for this branch (see [Tests served by Qualio](#tests-served-by-qualio)). |
-| `working-directory` | `e2e` | The tests folder (holds `package.json` and `playwright.config.ts`). Only with `tests-source: repo`. |
+| `tests-source` | `repo` | `qualio`: download the project's tests from Qualio for this branch (see [Tests served by Qualio](#tests-served-by-qualio)). Qualio keeps every project's tests now, and its generated workflows set this. `repo` (**deprecated**, kept so older workflows keep working): run a tests folder in the repository. |
+| `working-directory` | `e2e` | **Deprecated.** The tests folder (holds `package.json` and `playwright.config.ts`). Only with `tests-source: repo`. |
 | `api-key` | required | The Project API key, from the `QUALIO_API_KEY` secret. If empty, the tests still run but nothing is reported (with a warning); `tests-source: qualio` fails instead, since it can't download the tests. |
 | `api-url` | required | The Qualio URL that results are reported to. |
 | `base-url` | `''` | The environment under test. Empty uses the target URL in `playwright.config.ts`. |
@@ -274,7 +274,7 @@ Test account secrets (`E2E_<ROLE>_…`) are not inputs: set them in the job's `e
 
 ### Tests served by Qualio
 
-With `tests-source: qualio` (projects whose **Where tests live** setting is *Qualio*), the repository only holds `.github/workflows/qualio.yml`, which Qualio's Getting started page gives you. The workflow should run on `pull_request` with `types: [opened, synchronize, reopened, closed]` and on `workflow_dispatch`.
+With `tests-source: qualio` (every Qualio project: Qualio keeps the tests), the repository only holds `.github/workflows/qualio.yml`, which Qualio's Getting started page gives you. The workflow should run on `pull_request` with `types: [opened, synchronize, reopened, closed]` and on `workflow_dispatch`.
 
 1. The action downloads the tests for the branch (`POST /v1/tests/bundle`) into `$RUNNER_TEMP/qualio-e2e`: the main tests, plus heals Qualio made on this branch. Before Qualio has generated any tests, it logs a notice and runs nothing.
 2. It installs and runs them as above. The reporter writes the run id to a file so the action can follow the heal.
@@ -349,7 +349,7 @@ Requirements: the repository is public, it has exactly one action metadata file 
 ### 6. Verify end to end from a scratch repository
 
 1. Create a private test repository with a Qualio project connected to it (Part 1, Steps 1–5). The [school demo](https://github.com/Qualio-AI/qualio-school-demo) makes a good target app.
-2. Approve a feature. With **Where tests live** set to *Repository*, Qualio's pull request adds `e2e/` and `qualio.yml`; with *Qualio*, add the workflow from the Getting started page yourself and open any pull request.
+2. Approve a feature, add the workflow from the Getting started page (or merge the setup pull request) and open any pull request.
 3. Confirm the **Qualio E2E** check runs, its summary links to the run in Qualio, and the run appears under **Runs**. With *Qualio*, change a button label in the pull request: the summary should show **Heal: patched** and a passing re-run.
 
 ### Later releases
