@@ -75,6 +75,9 @@ async function download(dir, branch) {
   if (status !== 200) throw new Error(`Downloading the tests failed (${status}): ${body.error ?? 'unknown error'}`);
   await writeFiles(dir, body.files);
   console.log(`Downloaded ${body.files.length} files of the tests for ${branch} (bundle ${body.bundleId}).`);
+  // Tickets this pull request names whose tests Qualio hasn't written yet: Qualio runs the workflow again once they are.
+  for (const { key, reason } of body.pending ?? [])
+    console.log(`::notice title=Qualio::${key} has no tests in this run yet: ${reason}. Qualio runs this workflow again once they are written.`);
   await output({ found: 'true', 'bundle-id': body.bundleId });
 }
 
