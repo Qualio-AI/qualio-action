@@ -111,6 +111,14 @@ async function install(dir) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+// Job summary blocks, as Qualio writes them on GitHub (@qualio/shared/github-markdown in qualio-webapp).
+const alert = (kind, body) => [`> [!${kind}]`, ...body.trim().split('\n').map((line) => (line.trim() ? `> ${line}` : '>'))].join('\n');
+const cell = (text, max = 200) => {
+  const line = String(text).replace(/\s*\n\s*/g, ' ').trim();
+  return (line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line).replace(/\|/g, '\\|');
+};
+const details = (title, body) => `<details><summary>${title}</summary>\n\n${body}\n\n</details>`;
+
 async function summary(lines) {
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${lines.join('\n')}\n`);
 }
@@ -164,11 +172,21 @@ async function setup(testsDir, mapDir, branch, minutes) {
       const counts = `${plural(result.tests, 'test')} across ${plural(result.features, 'feature')}`;
       console.log(`The first test suite is ready: ${counts}, all passing.`);
       await summary([
-        '### Qualio: first test suite ready',
+        '### 🎉 Qualio: first test suite ready',
         '',
-        `${counts}, all passing in this job (check ${state.round}).${state.url ? ` [Open it in Qualio](${state.url})` : ''}`,
+        alert('TIP', `✅ ${counts}, all passing in this job (check ${state.round}).${state.url ? ` [Open it in Qualio](${state.url})` : ''}`),
         ...(result.dropped.length
-          ? ['', `Left out (${result.dropped.length}):`, ...result.dropped.map((d) => `- ${d.featureKey} ${d.test}: ${d.reason}${d.bug ? ' **(looks like an application bug)**' : ''}`)]
+          ? [
+              '',
+              details(
+                `⚠️ Left out (${result.dropped.length})`,
+                [
+                  '|  | Feature | Test | Reason |',
+                  '|---|---|---|---|',
+                  ...result.dropped.map((d) => `| ${d.bug ? '🐞' : '⏭️'} | ${cell(d.featureKey, 40)} | ${cell(d.test)} | ${cell(`${d.reason}${d.bug ? ': looks like an application bug' : ''}`, 300)} |`),
+                ].join('\n'),
+              ),
+            ]
           : []),
       ]);
       return output({ state: 'completed' });
