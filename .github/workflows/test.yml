@@ -15,6 +15,16 @@ jobs:
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
           ./actionlint -color
 
+  # The download's git check: tests from before the merges the checked-out commit lacks.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node --test test/
+
   fixture:
     runs-on: ubuntu-latest
     # Test account secrets reach the tests through the job env, as in the generated workflow.

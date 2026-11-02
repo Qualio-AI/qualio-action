@@ -6,15 +6,18 @@
 // It also answers the pull request sync and the GitHub outbox (empty unless "outbox"), and stands in
 // for the GitHub REST calls the outbox makes (/repos/...), for local runs with GITHUB_API_URL set to it.
 //
-//   node test/stub-qualio.mjs [port] [propose|setup|outbox]
+//   node test/stub-qualio.mjs [port] [propose|setup|outbox|lagging=<sha>]
 //     (default 4555; "propose": the project asks first, so the heal ends "proposed" and nothing is
 //     fixed; "setup": the project has no first test suite yet, so the job maps the app with the stub's
-//     mapper, and checks the suite twice: the first check fails, the "repaired" second one passes)
+//     mapper, and checks the suite twice: the first check fails, the "repaired" second one passes;
+//     "lagging=<sha>": pull request #11 merged as <sha> changed the tests, and a download with
+//     lacking: [11] gets the tests from before it)
 import http from 'node:http';
 
 const port = Number(process.argv[2] || 4555);
 const propose = process.argv[3] === 'propose';
 const setupMode = process.argv[3] === 'setup';
+const laggingSha = /^lagging=(\w+)$/.exec(process.argv[3] ?? '')?.[1] ?? null;
 // "outbox": a comment, a status, a dispatch and a label change wait for the job to send them.
 const outbox =
   process.argv[3] === 'outbox'
@@ -148,6 +151,19 @@ http
       setup.reported = body.round;
       setup.passed = body.status === 'passed';
       return res.writeHead(201).end(JSON.stringify({ runId: `run_${body.round}` }));
+    }
+    if (req.url === '/v1/tests/bundle' && laggingSha) {
+      const behind = body.lacking?.includes(11);
+      return res.end(
+        JSON.stringify({
+          bundleId: behind ? 'b_before' : 'b_latest',
+          revisionIds: [],
+          files: [{ path: 'tests/which.txt', content: behind ? 'before #11' : 'latest' }],
+          pending: [],
+          merges: [{ number: 11, sha: laggingSha }],
+          lacking: behind ? [11] : [],
+        }),
+      );
     }
     if (req.url === '/v1/tests/bundle') return res.end(JSON.stringify(body.suiteId ? suiteBundle() : bundle()));
     if (req.url === '/v1/tests/heal/status') {

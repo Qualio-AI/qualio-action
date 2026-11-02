@@ -14,7 +14,7 @@
 //
 // Reads QUALIO_API_URL and QUALIO_API_KEY (and GITHUB_TOKEN for outbox) from the environment and never prints them. Step
 // outputs go to $GITHUB_OUTPUT when it is set.
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -71,8 +71,51 @@ async function writeFiles(dir, files) {
   }
 }
 
+/** Runs git in the checked-out repository; never throws. */
+function git(args) {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd: process.env.GITHUB_WORKSPACE || process.cwd(), maxBuffer: 1 << 20, timeout: 120_000 }, (error, stdout) =>
+      resolve({ code: error ? (typeof error.code === 'number' ? error.code : 128) : 0, stdout: String(stdout ?? '').trim() }),
+    );
+  });
+}
+
+/**
+ * Which of `merges` ({ number, sha }: pull requests merged into the target branch that changed the
+ * main tests) the checked-out code doesn't contain. Their tests expect changes this code doesn't
+ * have yet, so Qualio serves the tests from before them. Null when it can't tell (no git, no
+ * history): the latest tests are used, as before.
+ */
+async function lackingMerges(merges) {
+  if ((await git(['rev-parse', '--is-inside-work-tree'])).stdout !== 'true') return null;
+  // A pull_request job checks out the pull request merged with the current base: it has every merge.
+  if (/^pull_request/.test(process.env.GITHUB_EVENT_NAME ?? '') && process.env.GITHUB_EVENT_PATH) {
+    try {
+      const head = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8')).pull_request?.head?.sha;
+      if (head && (await git(['rev-parse', 'HEAD'])).stdout !== head) return [];
+    } catch {}
+  }
+  // actions/checkout fetches one commit: get the history (commits and trees only, no file contents).
+  if ((await git(['rev-parse', '--is-shallow-repository'])).stdout === 'true' && (await git(['fetch', '--quiet', '--no-tags', '--filter=blob:none', '--unshallow', 'origin'])).code !== 0)
+    return null;
+  const lacking = [];
+  for (const { number, sha } of merges) {
+    if (!/^[0-9a-f]{7,64}$/.test(sha)) continue;
+    let { code } = await git(['merge-base', '--is-ancestor', sha, 'HEAD']);
+    if (code > 1 && (await git(['fetch', '--quiet', '--no-tags', '--filter=blob:none', 'origin', sha])).code === 0) code = (await git(['merge-base', '--is-ancestor', sha, 'HEAD'])).code;
+    // 1: not an ancestor. Anything else (a commit GitHub no longer has): don't count it.
+    if (code === 1) lacking.push(number);
+  }
+  return lacking;
+}
+
 async function download(dir, branch) {
-  const { status, body } = await call('/v1/tests/bundle', { branch });
+  let { status, body } = await call('/v1/tests/bundle', { branch });
+  if (status === 200 && body.merges?.length) {
+    const lacking = await lackingMerges(body.merges);
+    if (lacking === null) console.log('::notice title=Qualio::Could not check which merged pull requests this commit includes (no git history), so the latest tests are used.');
+    else if (lacking.length) ({ status, body } = await call('/v1/tests/bundle', { branch, lacking }));
+  }
   if (status === 404) {
     console.log(`::notice title=Qualio::${body.error ?? 'This project has no tests yet.'}`);
     return output({ found: 'false' });
@@ -80,6 +123,11 @@ async function download(dir, branch) {
   if (status !== 200) throw new Error(`Downloading the tests failed (${status}): ${body.error ?? 'unknown error'}`);
   await writeFiles(dir, body.files);
   console.log(`Downloaded ${body.files.length} files of the tests for ${branch} (bundle ${body.bundleId}).`);
+  if (body.lacking?.length) {
+    const refs = body.lacking.map((n) => `#${n}`);
+    const list = refs.length === 1 ? refs[0] : `${refs.slice(0, -1).join(', ')} and ${refs.at(-1)}`;
+    console.log(`::warning title=Qualio::This branch doesn't include ${list} yet, so the tests from before ${refs.length === 1 ? 'it' : 'them'} run and failures aren't healed. Merge or rebase the target branch to run the latest tests.`);
+  }
   // Tickets this pull request names whose tests Qualio hasn't written yet: Qualio runs the workflow again once they are.
   for (const { key, reason } of body.pending ?? [])
     console.log(`::notice title=Qualio::${key} has no tests in this run yet: ${reason}. Qualio runs this workflow again once they are written.`);
@@ -259,6 +307,8 @@ async function sync() {
     baseBranch: pr.base.ref,
     headSha: pr.head.sha,
     merged: Boolean(pr.merged),
+    // The merge commit: runs on branches without it get the main tests from before this pull request.
+    mergeCommitSha: pr.merged ? (pr.merge_commit_sha ?? null) : null,
     emptySecrets,
   });
   if (status !== 200) return console.log(`::warning title=Qualio::Qualio could not record pull request #${pr.number} (${status}): ${body.error ?? 'unknown error'}`);
