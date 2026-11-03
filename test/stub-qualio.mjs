@@ -6,7 +6,7 @@
 // It also answers the pull request sync and the GitHub outbox (empty unless "outbox"), and stands in
 // for the GitHub REST calls the outbox makes (/repos/...), for local runs with GITHUB_API_URL set to it.
 //
-//   node test/stub-qualio.mjs [port] [propose|setup|outbox|lagging=<sha>]
+//   node test/stub-qualio.mjs [port] [propose|setup|outbox|report-lost|lagging=<sha>]
 //     (default 4555; "propose": the project asks first, so the heal ends "proposed" and nothing is
 //     fixed; "setup": the project has no first test suite yet, so the job maps the app with the stub's
 //     mapper, and checks the suite twice: the first check fails, the "repaired" second one passes;
@@ -18,14 +18,22 @@ const port = Number(process.argv[2] || 4555);
 const propose = process.argv[3] === 'propose';
 const setupMode = process.argv[3] === 'setup';
 const laggingSha = /^lagging=(\w+)$/.exec(process.argv[3] ?? '')?.[1] ?? null;
-// "outbox": a comment, a status, a dispatch and a label change wait for the job to send them.
+// "outbox": a comment, a status, a dispatch, a label change, the pull request's report (posted, as no
+// report exists yet) and a reaction wait for the job to send them. "report-lost": the report's stored
+// comment is gone (404), so the job finds it by its marker and edits that one.
+const reportLost = process.argv[3] === 'report-lost';
+const REPORT = '<!-- qualio:report -->\n\n### ✅ Qualio: Ready to merge';
 const outbox =
-  process.argv[3] === 'outbox'
+  reportLost
+    ? [{ id: 'r1', kind: 'REPORT', prNumber: 7, sha: null, payload: { prNumber: 7, body: REPORT, commentId: 404 } }]
+    : process.argv[3] === 'outbox'
     ? [
         { id: 'o1', kind: 'COMMENT', prNumber: 7, sha: null, payload: { prNumber: 7, body: 'Qualio AI: the tests pass.' } },
         { id: 'o2', kind: 'STATUS', prNumber: null, sha: 'abc1234', payload: { sha: 'abc1234', state: 'failure', context: 'qualio/regression', description: 'Possible regression' } },
         { id: 'o3', kind: 'DISPATCH', prNumber: null, sha: null, payload: { ref: 'feature/sch-9' } },
         { id: 'o4', kind: 'LABEL', prNumber: 7, sha: null, payload: { prNumber: 7, add: ['qualio: tests passing'], remove: ['qualio: regression'] } },
+        { id: 'o5', kind: 'REPORT', prNumber: 7, sha: null, payload: { prNumber: 7, body: REPORT, commentId: null } },
+        { id: 'o6', kind: 'REACTION', prNumber: 7, sha: null, payload: { prNumber: 7, commentId: 55, content: '+1' } },
       ]
     : [];
 const calls = [];
@@ -130,6 +138,7 @@ function setupStatus() {
 http
   .createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/__calls') return res.end(JSON.stringify(calls));
+    if (req.method === 'GET' && req.url === '/__outbox') return res.end(JSON.stringify(outbox));
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
@@ -138,6 +147,10 @@ http
     // GitHub's REST API, as the outbox uses it (any token).
     if (req.url.startsWith('/repos/')) {
       if (req.method === 'DELETE') return res.writeHead(404).end(JSON.stringify({ message: 'Label does not exist' }));
+      // The pull request's comments: with report-lost, Qualio's report is there under another id.
+      if (req.method === 'GET' && /\/issues\/\d+\/comments/.test(req.url))
+        return res.end(JSON.stringify(reportLost ? [{ id: 3, body: 'LGTM', user: { type: 'User' } }, { id: 77, body: REPORT, user: { type: 'Bot' } }] : []));
+      if (req.method === 'PATCH') return req.url.endsWith('/comments/404') ? res.writeHead(404).end(JSON.stringify({ message: 'Not Found' })) : res.end(JSON.stringify({ id: Number(req.url.split('/').pop()) }));
       return res.writeHead(req.url.endsWith('/dispatches') ? 204 : 201).end(req.url.endsWith('/dispatches') ? '' : JSON.stringify({ id: 1 }));
     }
     if (req.headers.authorization !== 'Bearer qk_stub') return res.writeHead(401).end(JSON.stringify({ error: 'Invalid or revoked API key' }));
@@ -180,6 +193,7 @@ http
       const item = outbox.find((i) => i.id === ack[1] && !i.sent);
       if (!item) return res.writeHead(404).end(JSON.stringify({ error: 'No pending outbox item with this id' }));
       item.sent = true;
+      item.ack = body;
       return res.end(JSON.stringify({ ok: true }));
     }
     if (req.url === '/v1/runs/errored') return res.end(JSON.stringify({ ok: true }));

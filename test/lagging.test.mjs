@@ -1,6 +1,6 @@
 // The download checks the checked-out commit against the merges Qualio lists, and asks for the tests
 // from before the ones it lacks. Runs against test/stub-qualio.mjs and a throwaway git repository.
-//   node --test test/
+//   node --test test/*.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';

@@ -318,7 +318,7 @@ async function sync() {
   if (emptySecrets.length) console.log(`::warning title=Qualio::These test account secrets are empty, so tests that sign in as those roles will fail: ${emptySecrets.join(', ')}. Add them in Settings → Secrets and variables → Actions.`);
 }
 
-/** One GitHub REST call with the job's token. Returns the HTTP status (0 when GitHub couldn't be reached). */
+/** One GitHub REST call with the job's token. Returns the HTTP status (0 when GitHub couldn't be reached) and the answer's JSON. */
 async function github(method, route, body) {
   const base = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   try {
@@ -329,20 +329,66 @@ async function github(method, route, body) {
       signal: AbortSignal.timeout(30_000),
     });
     const text = await res.text();
-    return { status: res.status, message: res.ok ? '' : (() => { try { return JSON.parse(text).message; } catch { return text.slice(0, 200); } })() };
+    const data = (() => { try { return JSON.parse(text); } catch { return null; } })();
+    return { status: res.status, data, message: res.ok ? '' : (data?.message ?? text.slice(0, 200)) };
   } catch (error) {
     return { status: 0, message: error.message };
   }
 }
 
-/** Sends one outbox item. Returns the GitHub call that failed, if one did. */
+/** Starts Qualio's report comment on a pull request (an HTML comment, invisible on GitHub). */
+const REPORT_MARKER = '<!-- qualio:report -->';
+
+/** Qualio's report comment on a pull request, found by its marker: its id, or null. */
+async function findReport(repo, prNumber) {
+  for (let page = 1; page <= 10; page += 1) {
+    const r = await github('GET', `${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`);
+    if (r.status !== 200 || !Array.isArray(r.data)) return null;
+    const found = r.data.find((c) => c.user?.type === 'Bot' && (c.body ?? '').trimStart().startsWith(REPORT_MARKER));
+    if (found) return found.id;
+    if (r.data.length < 100) return null;
+  }
+  return null;
+}
+
+/**
+ * The pull request's report: one comment, edited in place. Edits the comment Qualio knows, else the one
+ * with the marker (its id was lost, or a job posted it without telling Qualio), else posts it.
+ */
+async function deliverReport(repo, item) {
+  const body = { body: item.payload.body };
+  const edit = async (id) => {
+    const r = await github('PATCH', `${repo}/issues/comments/${id}`, body);
+    return r.status >= 200 && r.status < 300 ? { commentId: id } : r.status === 404 ? null : { failed: r };
+  };
+  if (item.payload.commentId) {
+    const edited = await edit(item.payload.commentId);
+    if (edited) return edited;
+  }
+  const found = await findReport(repo, item.prNumber);
+  if (found) {
+    const edited = await edit(found);
+    if (edited) return edited;
+  }
+  const r = await github('POST', `${repo}/issues/${item.prNumber}/comments`, body);
+  return r.status >= 200 && r.status < 300 ? { commentId: r.data?.id ?? null } : { failed: r };
+}
+
+/** Sends one outbox item. Returns the GitHub call that failed, if one did, and the report comment's id. */
 async function deliver(item) {
   const repo = `/repos/${process.env.GITHUB_REPOSITORY}`;
+  if (item.kind === 'REPORT') return deliverReport(repo, item);
+  return { failed: await deliverOne(repo, item) };
+}
+
+async function deliverOne(repo, item) {
   const p = item.payload;
   const ok = (r) => (r.status >= 200 && r.status < 300 ? null : r);
   switch (item.kind) {
     case 'COMMENT':
       return ok(await github('POST', `${repo}/issues/${item.prNumber}/comments`, { body: p.body }));
+    case 'REACTION':
+      return ok(await github('POST', `${repo}/issues/comments/${p.commentId}/reactions`, { content: p.content }));
     case 'STATUS':
       return ok(await github('POST', `${repo}/statuses/${item.sha}`, { state: p.state, context: p.context, description: p.description?.slice(0, 140), target_url: p.targetUrl }));
     case 'DISPATCH': {
@@ -371,14 +417,14 @@ async function sendBatch(items) {
   let sent = 0;
   let denied = false;
   for (const item of items) {
-    const failed = await deliver(item);
+    const { failed, commentId } = await deliver(item);
     // Missing token permissions, rate limits and GitHub outages are retried by the next job.
     if (failed && (failed.status === 0 || failed.status === 403 || failed.status === 429 || failed.status >= 500)) {
       denied ||= failed.status === 403;
       console.log(`Not sent yet (${item.kind}, GitHub ${failed.status || 'unreachable'}): ${failed.message}`);
       continue;
     }
-    await call(`/v1/pr/outbox/${item.id}/ack`, { error: failed ? `GitHub ${failed.status}: ${failed.message}` : null });
+    await call(`/v1/pr/outbox/${item.id}/ack`, { error: failed ? `GitHub ${failed.status}: ${failed.message}` : null, ...(commentId && { commentId }) });
     if (!failed) sent += 1;
     else console.log(`GitHub refused an update (${item.kind}, ${failed.status}): ${failed.message}`);
   }
@@ -398,7 +444,8 @@ async function outbox(waitMinutes = '0') {
   let denied = false;
   let quiet = 0;
   for (;;) {
-    const { status, body } = await call('/v1/pr/outbox', {});
+    // report: this action edits Qualio's one report comment in place and reacts to commands.
+    const { status, body } = await call('/v1/pr/outbox', { report: true });
     if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
     const batch = await sendBatch(body.items);
     sent += batch.sent;
