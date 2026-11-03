@@ -310,6 +310,8 @@ async function sync() {
     // The merge commit: runs on branches without it get the main tests from before this pull request.
     mergeCommitSha: pr.merged ? (pr.merge_commit_sha ?? null) : null,
     emptySecrets,
+    // Who opened it: Qualio tells them in the app when a test finds a possible bug.
+    author: pr.user?.login ?? null,
   });
   if (status !== 200) return console.log(`::warning title=Qualio::Qualio could not record pull request #${pr.number} (${status}): ${body.error ?? 'unknown error'}`);
   console.log(`Qualio recorded pull request #${pr.number} (${event.action}).`);
