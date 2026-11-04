@@ -243,6 +243,8 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `api-key` | required | The Project API key, from the `QUALIO_API_KEY` secret. If empty, the tests still run but nothing is reported (with a warning); `tests-source: qualio` fails instead, since it can't download the tests. |
 | `api-url` | required | The Qualio URL that results are reported to. |
 | `base-url` | `''` | The environment under test. Empty uses the target URL in `playwright.config.ts`. |
+| `config` | `''` | How Qualio works on this project, as YAML (`version: 1`): `overview` (documents in the repository), `specs.approval`, `self-healing` (`sensitivity`, `sure-from`, `rules`), `mapping` (`max-pages`, `start-paths`, `exclude`), `roles`, `github` (`target-branch`, `report`) and `jira` (`projects`, `board`, `columns`). Sent to Qualio (`POST /v1/config/sync`) in every job with a checkout; the settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. An invalid config fails the job. See [Configuration](#configuration). |
+| `config-file` | `''` | A YAML file in the repository with the same config (e.g. `.qualio/config.yml`), instead of `config`. Needs `actions/checkout`. |
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
 | `setup-wait-minutes` | `25` | The first run (no test suite yet) maps the app and checks the generated tests in the job. How long that may take before the job gives up; a re-run continues where it stopped. Keep it a few minutes under the job's `timeout-minutes`. |
 | `heal-wait-minutes` | `10` | With `tests-source: qualio`, how long to wait for Qualio's heal of a failed run before giving up on the re-run. |
@@ -259,19 +261,48 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | --- | --- |
 | `playwright-version` | The `@playwright/test` version installed in the tests folder. |
 | `qualio-run-url` | The run's page in Qualio (the re-run's, after a heal). Empty when the results were not reported. |
+| `config-scope` | Where this job's config applied: `project`, `branch` or `none`. Empty without `config`/`config-file`. |
 | `setup-state` | `ready` (the project already had its first suite) or `completed` (this job set it up). Empty when the setup didn't run (no `api-key`). |
 | `heal-status` | With `tests-source: qualio`, how healing a failed run ended: `patched`, `proposed` (the project asks first: someone decides in Qualio), `declined`, `not_healable`, `stopped`, `failed`, `timeout` or `none`. Empty when the tests passed or weren't run. |
+
+### Configuration
+
+Qualio is configured from the workflow, so nobody needs its dashboard to set it up:
+
+```yaml
+      - uses: qualio-ai/qualio-action@v1
+        with:
+          tests-source: qualio
+          api-key: ${{ secrets.QUALIO_API_KEY }}
+          api-url: ${{ vars.QUALIO_API_URL }}
+          config: |
+            version: 1
+            overview: docs/qualio/          # .md/.txt files the agents read: domain rules, journeys, skills
+            specs:
+              approval: automatic           # automatic | ask-me-first
+            self-healing:
+              sensitivity: balanced         # supervised | balanced | autonomous
+            mapping:
+              max-pages: 25
+              exclude: [/logout]
+            roles:                          # credentials: secrets E2E_<ROLE>_USERNAME / _PASSWORD
+              - name: Admin
+                description: Can do everything
+```
+
+The step **Sync the Qualio config** sends the YAML, then the overview documents Qualio asks for (only those whose content it doesn't have yet; at most 50 files and 256 KB). Qualio validates it: problems fail the job as `::error title=Qualio config::<key>: <problem>`, unknown keys are warnings, and anything that looks like a secret is refused. The target branch's config is the project's; a pull request's stricter changes apply to its branch at once, and its looser and project-wide ones when it merges. The job summary lists what changed.
 
 ### What it does
 
 1. Checks that `working-directory` holds a tests folder (on the setup pull request it may not exist yet), and warns if `api-key` or `api-url` is empty.
-2. Asks Qualio whether the project has a first test suite (`POST /v1/setup/start`). If not, sets it up in this job: runs the mapper Qualio sends, waits for the suite (`/v1/setup/:id/status`), and runs each check of it (`/v1/tests/bundle` with `suiteId`, `QUALIO_RUN_ROUND` = the check; no retries and a 20-second test timeout, so a wrong locator fails fast) until it is ready; the job then ends (`setup-state` output `completed`). Up to `setup-wait-minutes` (default 25).
-3. Sets up Node.js.
-4. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise).
-5. Installs Chromium and its system dependencies, caching the browser per Playwright version.
-6. Runs `npx playwright test` with `QUALIO_API_URL`, `QUALIO_API_KEY`, `QUALIO_BASE_URL` and `QUALIO_COMMIT_SHA` set. The generated `support/qualio-reporter.ts` uses them to report to Qualio and request self-healing. A failing test fails the job.
-7. Uploads Playwright's HTML report as the `playwright-report` artifact.
-8. Writes a job summary with the result and a link to the run in Qualio.
+2. With `config` or `config-file`, sends Qualio the config and the overview documents it names (see [Configuration](#configuration)).
+3. Asks Qualio whether the project has a first test suite (`POST /v1/setup/start`). If not, sets it up in this job: runs the mapper Qualio sends, waits for the suite (`/v1/setup/:id/status`), and runs each check of it (`/v1/tests/bundle` with `suiteId`, `QUALIO_RUN_ROUND` = the check; no retries and a 20-second test timeout, so a wrong locator fails fast) until it is ready; the job then ends (`setup-state` output `completed`). Up to `setup-wait-minutes` (default 25).
+4. Sets up Node.js.
+5. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise).
+6. Installs Chromium and its system dependencies, caching the browser per Playwright version.
+7. Runs `npx playwright test` with `QUALIO_API_URL`, `QUALIO_API_KEY`, `QUALIO_BASE_URL` and `QUALIO_COMMIT_SHA` set. The generated `support/qualio-reporter.ts` uses them to report to Qualio and request self-healing. A failing test fails the job.
+8. Uploads Playwright's HTML report as the `playwright-report` artifact.
+9. Writes a job summary with the result and a link to the run in Qualio.
 
 Test account secrets (`E2E_<ROLE>_…`) are not inputs: set them in the job's `env`, which the action's steps inherit. The action never prints the API key.
 

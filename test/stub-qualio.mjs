@@ -186,6 +186,25 @@ http
       return res.end(JSON.stringify({ status: healed ? 'patched' : 'running' }));
     }
     if (req.url === '/v1/pr/sync') return res.end(JSON.stringify({ ok: true }));
+    // The qualio.yml config: a locked rule is invalid; an overview is asked for, then the config is synced.
+    if (req.url === '/v1/config/sync') {
+      if (/bug:\s*heal/.test(body.raw)) {
+        res.statusCode = 422;
+        return res.end(JSON.stringify({ state: 'invalid', problems: [{ key: 'self-healing.rules.bug', message: "can't be set: a possible bug is never healed" }], warnings: [] }));
+      }
+      const overview = /^overview:\s*(\S+)/m.exec(body.raw)?.[1];
+      if (overview && !body.overview) return res.end(JSON.stringify({ state: 'overview', paths: [overview], known: [], maxFiles: 50, maxBytes: 262144 }));
+      return res.end(
+        JSON.stringify({
+          state: 'synced',
+          scope: body.prNumber ? 'BRANCH' : 'PROJECT',
+          message: `Synced ${body.overview?.length ?? 0} overview files.`,
+          applied: [],
+          changes: body.prNumber ? [{ key: 'healPolicy', label: 'Self-healing', from: 'Balanced', to: 'Autonomous', when: 'merge', why: 'looser' }] : [],
+          warnings: [],
+        }),
+      );
+    }
     if (req.url === '/v1/pr/comment') return res.end(JSON.stringify(/^\/qualio /.test(body.body) ? { outcome: 'command', command: body.body.split(' ')[1] } : { outcome: 'answered' }));
     if (req.url === '/v1/pr/outbox') return res.end(JSON.stringify({ items: outbox.filter((i) => !i.sent), waiting: false }));
     const ack = /^\/v1\/pr\/outbox\/(\w+)\/ack$/.exec(req.url);

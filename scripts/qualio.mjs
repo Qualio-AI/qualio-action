@@ -7,6 +7,8 @@
 //   node qualio.mjs promote <branch> <merged> [base]  a closed pull request: keep or drop its heals
 //   node qualio.mjs wait <run-file> <minutes>    waits for the heal of the run the reporter wrote
 //   node qualio.mjs sync                         tells Qualio about this pull request (title, branch, head, merged)
+//   node qualio.mjs config <branch>              sends qualio.yml's config (CONFIG or CONFIG_FILE) and the overview
+//                                                documents it names; fails the job when the config is invalid
 //   node qualio.mjs outbox [wait-minutes]        sends what Qualio queued for GitHub (comments, statuses,
 //                                                dispatches, labels) with GITHUB_TOKEN; waits for answers
 //   node qualio.mjs comment                      relays a new pull request comment to Qualio (comment job)
@@ -15,7 +17,8 @@
 // Reads QUALIO_API_URL and QUALIO_API_KEY (and GITHUB_TOKEN for outbox) from the environment and never prints them. Step
 // outputs go to $GITHUB_OUTPUT when it is set.
 import { execFile, spawn } from 'node:child_process';
-import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const apiUrl = (process.env.QUALIO_API_URL ?? '').replace(/\/+$/, '');
@@ -478,6 +481,100 @@ async function comment() {
   console.log(body.outcome === 'ignored' ? `Qualio skipped the comment: ${body.reason}.` : `Qualio received the comment (${body.command ?? body.outcome}).`);
 }
 
+const OVERVIEW_EXTENSIONS = ['.md', '.markdown', '.txt'];
+const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+
+/** The overview documents a config names: files, or the .md/.txt files of folders (recursively), inside the checkout. */
+async function overviewFiles(paths, { known, maxFiles, maxBytes }) {
+  const root = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
+  const found = new Map();
+  const visit = async (abs, rel, named) => {
+    const info = await stat(abs).catch(() => null);
+    if (!info) throw new Error(`overview: ${rel} does not exist in the checked-out repository. Check out the repository first (actions/checkout) and check the path.`);
+    if (info.isDirectory()) {
+      for (const entry of (await readdir(abs)).sort()) if (!entry.startsWith('.') && entry !== 'node_modules') await visit(path.join(abs, entry), path.posix.join(rel, entry), false);
+    } else if (OVERVIEW_EXTENSIONS.includes(path.extname(abs).toLowerCase())) found.set(rel, abs);
+    else if (named) console.log(`::warning title=Qualio config::overview: ${rel} is skipped (only ${OVERVIEW_EXTENSIONS.join(', ')} files are sent).`);
+  };
+  for (const p of paths) {
+    const rel = p.replace(/\/+$/, '') || '.';
+    const abs = path.resolve(root, rel);
+    if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`overview: ${p} is outside the repository.`);
+    await visit(abs, rel, true);
+  }
+  const files = [];
+  let bytes = 0;
+  for (const [rel, abs] of [...found].sort(([a], [b]) => a.localeCompare(b))) {
+    if (files.length >= maxFiles) {
+      console.log(`::warning title=Qualio config::overview: only the first ${maxFiles} files are sent; ${found.size - maxFiles} more are skipped.`);
+      break;
+    }
+    const content = await readFile(abs, 'utf8');
+    bytes += Buffer.byteLength(content);
+    if (bytes > maxBytes) throw new Error(`overview: the documents are over ${Math.round(maxBytes / 1024)} KB. Point overview at fewer or shorter files.`);
+    const hash = sha256(content);
+    // Only what Qualio doesn't have yet travels.
+    files.push(known.includes(hash) ? { path: rel, sha256: hash } : { path: rel, sha256: hash, content });
+  }
+  return files;
+}
+
+/**
+ * Sends the workflow's Qualio config (the action's config input, or the file config-file names) to
+ * Qualio, which validates and applies it: to the project (its first config, or the target branch), or to
+ * this pull request's branch (stricter changes now, looser ones when it merges). The overview documents
+ * it names are read from the checkout and sent too. Qualio never reads the repository itself.
+ */
+async function config(branch) {
+  const inline = process.env.CONFIG ?? '';
+  const file = (process.env.CONFIG_FILE ?? '').trim();
+  if (inline.trim() && file) throw new Error('Use either the config input or config-file, not both.');
+  let raw = inline;
+  let source = 'inline';
+  if (file) {
+    const root = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
+    const abs = path.resolve(root, file);
+    if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`config-file ${file} is outside the repository.`);
+    raw = await readFile(abs, 'utf8').catch(() => {
+      throw new Error(`config-file ${file} does not exist. Check out the repository first (actions/checkout) and check the path.`);
+    });
+    source = file;
+  }
+  if (!raw.trim()) return output({ scope: 'none' });
+  let prNumber = null;
+  if (/^pull_request/.test(process.env.GITHUB_EVENT_NAME ?? '') && process.env.GITHUB_EVENT_PATH)
+    prNumber = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8')).pull_request?.number ?? null;
+  const request = { branch, prNumber, headSha: process.env.QUALIO_COMMIT_SHA || process.env.GITHUB_SHA || '0000000', source, raw };
+
+  let { status, body } = await call('/v1/config/sync', request);
+  // Qualio names the overview paths it needs (and the contents it already has); a second ask means it lost them.
+  for (let round = 0; status === 200 && body.state === 'overview' && round < 2; round++) {
+    const overview = await overviewFiles(body.paths, { known: round === 0 ? (body.known ?? []) : [], maxFiles: body.maxFiles ?? 50, maxBytes: body.maxBytes ?? 256 * 1024 });
+    ({ status, body } = await call('/v1/config/sync', { ...request, overview }));
+  }
+  for (const w of body.warnings ?? []) console.log(`::warning title=Qualio config::${typeof w === 'string' ? w : `${w.key}: ${w.message}`}`);
+  if (status === 422) {
+    for (const p of body.problems ?? []) console.log(`::error title=Qualio config::${p.key}: ${p.message}`);
+    throw new Error(`The Qualio config in ${source === 'inline' ? 'the workflow' : source} is invalid (see the errors above). Nothing was changed in Qualio.`);
+  }
+  if (status !== 200 || body.state !== 'synced') throw new Error(`Qualio could not read the config (${status}): ${body.error ?? 'unknown error'}`);
+
+  console.log(`::group::Qualio config (${source === 'inline' ? 'qualio.yml' : source})`);
+  console.log(body.message);
+  for (const c of body.changes ?? []) console.log(`  ${c.label}: ${c.from} → ${c.to} (${c.when === 'now' ? 'on this branch now' : `when merged${c.why === 'looser' ? ', looser' : ''}`})`);
+  console.log('::endgroup::');
+  const lines = ['### Qualio config', '', body.message];
+  if (body.changes?.length)
+    lines.push(
+      '',
+      '| Setting | From | To | Applies |',
+      '| --- | --- | --- | --- |',
+      ...body.changes.map((c) => `| ${cell(c.label)} | ${cell(c.from)} | ${cell(c.to)} | ${c.when === 'now' ? 'On this branch now' : c.why === 'looser' ? 'When merged (looser)' : 'When merged'} |`),
+    );
+  await summary(lines);
+  await output({ scope: String(body.scope).toLowerCase() });
+}
+
 /** This job failed before the reporter sent results: the run shows as errored in Qualio right away. */
 async function errored(conclusion) {
   const { GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_SERVER_URL, GITHUB_REPOSITORY } = process.env;
@@ -494,9 +591,9 @@ async function errored(conclusion) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-const commands = { setup, download, promote, wait, sync, outbox, errored, comment };
+const commands = { setup, download, promote, wait, sync, config, outbox, errored, comment };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use setup, download, promote, wait, sync, outbox, errored or comment.`);
+  console.error(`Unknown command "${command}". Use setup, download, promote, wait, sync, config, outbox, errored or comment.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {
