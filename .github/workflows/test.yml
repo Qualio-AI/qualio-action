@@ -15,7 +15,8 @@ jobs:
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
           ./actionlint -color
 
-  # The download's git check: tests from before the merges the checked-out commit lacks.
+  # The diff helpers, the tests folder's snapshot, the setup's config, and the outbox (report, suggestions,
+  # the Qualio pull request) against the stub Qualio and GitHub.
   scripts:
     runs-on: ubuntu-latest
     steps:
@@ -60,9 +61,10 @@ jobs:
           OUTCOME: ${{ steps.action.outcome }}
         run: test "$OUTCOME" = failure
 
-  # tests-source: qualio against a stub Qualio API: the downloaded test fails on a renamed button,
-  # the stub reports the heal as patched, and the re-run with the fixed test passes.
-  qualio-source:
+  # Tests in the repository against a stub Qualio API: test/heal-fixture's test fails on a renamed
+  # button, the stub reports the heal as patched, the action writes the fix on top of the checkout and
+  # the re-run passes, in the same job.
+  heal:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,11 +75,10 @@ jobs:
       - id: action
         uses: ./
         with:
-          tests-source: qualio
           api-key: qk_stub
           api-url: http://localhost:4555
           heal-wait-minutes: '1'
-      - name: The tests passed after the heal, in the same job
+      - name: The tests passed with the fix, in the same job
         env:
           OUTCOME: ${{ steps.action.outcome }}
           HEAL: ${{ steps.action.outputs.heal-status }}
@@ -86,38 +87,9 @@ jobs:
           test "$OUTCOME" = success
           test "$HEAL" = patched
           test "$RUN_URL" = http://stub.test/runs/run_2
-          outbox=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).filter((c) => c.route === '/v1/pr/outbox').length")
-          test "$outbox" = 2
-          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => !r.startsWith('/v1/pr/')).join(' ')")
-          test "$routes" = "/v1/setup/start /v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status /v1/tests/bundle"
-
-  # tests-source: qualio when the project asks first: the heal ends "proposed", nothing is re-run,
-  # and the job fails until someone decides in Qualio.
-  qualio-source-proposed:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Start the stub Qualio API (Ask me first)
-        run: |
-          node test/stub-qualio.mjs 4555 propose &
-          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
-      - id: action
-        uses: ./
-        continue-on-error: true
-        with:
-          tests-source: qualio
-          api-key: qk_stub
-          api-url: http://localhost:4555
-          heal-wait-minutes: '1'
-      - name: The job failed with the proposal, without a re-run
-        env:
-          OUTCOME: ${{ steps.action.outcome }}
-          HEAL: ${{ steps.action.outputs.heal-status }}
-        run: |
-          test "$OUTCOME" = failure
-          test "$HEAL" = proposed
-          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => !r.startsWith('/v1/pr/')).join(' ')")
-          test "$routes" = "/v1/setup/start /v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status"
+          grep -q "name: 'Log in'" test/heal-fixture/tests/login.spec.ts
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r.startsWith('/v1/tests/') || r === '/v1/setup/start').join(' ')")
+          test "$routes" = "/v1/setup/start /v1/tests/prepare /v1/tests/snapshot /v1/tests/snapshot /v1/tests/heal/status /v1/tests/heal/status /v1/tests/changes"
 
   # A project without a first test suite: the job maps the app with Qualio's mapper, then checks the
   # generated suite until it passes (the stub's first check fails, the "repaired" second passes),
@@ -135,7 +107,6 @@ jobs:
         env:
           QUALIO_POLL_MS: '500'
         with:
-          tests-source: qualio
           api-key: qk_stub
           api-url: http://localhost:4555
       - name: The suite was set up in the same job
@@ -146,32 +117,7 @@ jobs:
           test "$OUTCOME" = success
           test "$SETUP" = completed
           routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r !== '/v1/setup/s1/status' && !r.startsWith('/v1/pr/')).join(' ')")
-          test "$routes" = "/v1/setup/start /v1/setup/s1/mapped /v1/tests/bundle /v1/runs /v1/tests/bundle /v1/runs"
-
-  # Tests kept in the repository, on the setup pull request: no tests folder yet is not an error.
-  setup-repo:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Start the stub Qualio API (no first suite yet)
-        run: |
-          node test/stub-qualio.mjs 4555 setup &
-          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
-      - id: action
-        uses: ./
-        env:
-          QUALIO_POLL_MS: '500'
-        with:
-          working-directory: e2e-not-yet-committed
-          api-key: qk_stub
-          api-url: http://localhost:4555
-      - name: The suite was set up without a tests folder
-        env:
-          OUTCOME: ${{ steps.action.outcome }}
-          SETUP: ${{ steps.action.outputs.setup-state }}
-        run: |
-          test "$OUTCOME" = success
-          test "$SETUP" = completed
+          test "$routes" = "/v1/setup/start /v1/setup/s1/mapped /v1/tests/prepare /v1/tests/changes /v1/runs /v1/tests/prepare /v1/tests/changes /v1/runs"
 
   # The comment job (command: comment) never installs or runs tests, nor tells Qualio a pull request
   # closed; outside an issue_comment event it relays nothing.

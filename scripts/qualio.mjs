@@ -1,25 +1,32 @@
 // Talks to Qualio from the Qualio action. Node 20, no dependencies.
 //
-//   node qualio.mjs setup <tests-dir> <map-dir> <branch> <minutes>
+//   node qualio.mjs setup <map-dir> <branch> <minutes> [working-directory]
 //                                                sets up the first test suite if the project has none:
 //                                                maps the app, waits, runs each check until done
-//   node qualio.mjs download <dir> <branch>      writes the branch's tests into <dir>
-//   node qualio.mjs promote <branch> <merged> [base]  a closed pull request: keep or drop its heals
+//   node qualio.mjs prepare <branch> [working-directory]
+//                                                finds the tests folder (qualio.yml tests.path), sends Qualio a
+//                                                snapshot of it, and writes the changes Qualio offers on top
+//   node qualio.mjs apply <dir> <branch>         after a heal: writes the branch's changes (the fix) on top again
 //   node qualio.mjs wait <run-file> <minutes>    waits for the heal of the run the reporter wrote
 //   node qualio.mjs sync                         tells Qualio about this pull request (title, branch, head, merged)
 //   node qualio.mjs config <branch>              sends qualio.yml's config (CONFIG or CONFIG_FILE) and the overview
 //                                                documents it names; fails the job when the config is invalid
-//   node qualio.mjs outbox [wait-minutes]        sends what Qualio queued for GitHub (comments, statuses,
-//                                                dispatches, labels) with GITHUB_TOKEN; waits for answers
+//   node qualio.mjs outbox [wait-minutes]        sends what Qualio queued for GitHub (the report, statuses,
+//                                                dispatches, labels, and its changes to the tests: suggestions and
+//                                                the Qualio pull request) with GITHUB_TOKEN; waits for answers
 //   node qualio.mjs comment                      relays a new pull request comment to Qualio (comment job)
 //   node qualio.mjs errored <conclusion>         this job failed before reporting results
 //
+// The tests live in the repository (the folder qualio.yml's tests.path names). Qualio never reads the
+// repository: this job sends it the tests folder only, and pushes only Qualio's own qualio/* branches.
 // Reads QUALIO_API_URL and QUALIO_API_KEY (and GITHUB_TOKEN for outbox) from the environment and never prints them. Step
 // outputs go to $GITHUB_OUTPUT when it is set.
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { commentableLines, suggestionBlock, suggestionComments } from './diff.mjs';
 
 const apiUrl = (process.env.QUALIO_API_URL ?? '').replace(/\/+$/, '');
 const apiKey = process.env.QUALIO_API_KEY ?? '';
@@ -63,6 +70,92 @@ function safePath(dir, file) {
   return target;
 }
 
+const workspace = () => path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
+const actionDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+
+/** Folders of a tests folder that aren't tests: installed packages, Playwright's output, Qualio's runtime. */
+const NOT_TESTS = new Set(['node_modules', 'test-results', 'playwright-report', 'blob-report', '.qualio', '.git', '.cache']);
+const MAX_SNAPSHOT_FILES = 2000;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/** The tests folder's files (relative paths, posix), without packages and Playwright's output. */
+async function testFiles(dir) {
+  const out = [];
+  const visit = async (abs, rel) => {
+    for (const entry of (await readdir(abs, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (NOT_TESTS.has(entry.name)) continue;
+      const childAbs = path.join(abs, entry.name);
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await visit(childAbs, childRel);
+      else if (entry.isFile()) {
+        const info = await stat(childAbs);
+        if (info.size > MAX_FILE_BYTES) {
+          console.log(`::warning title=Qualio::${childRel} is over ${MAX_FILE_BYTES / 1024 / 1024} MB and is not sent to Qualio.`);
+          continue;
+        }
+        out.push({ path: childRel, content: await readFile(childAbs, 'utf8') });
+      }
+      if (out.length > MAX_SNAPSHOT_FILES) throw new Error(`The tests folder has over ${MAX_SNAPSHOT_FILES} files. Point qualio.yml's tests.path at the E2E tests only.`);
+    }
+  };
+  await visit(dir, '');
+  return out;
+}
+
+/** Writes files on top of a folder: null content deletes the file. */
+async function applyFiles(dir, files) {
+  for (const file of files) {
+    const target = safePath(dir, file.path);
+    if (file.content === null) await rm(target, { force: true });
+    else {
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, file.content);
+    }
+  }
+}
+
+/** The run manifest the reporter sends with the run: which of Qualio's changes this job applied. */
+async function writeManifest(bundleId, revisionIds) {
+  const file = process.env.QUALIO_RUN_MANIFEST;
+  if (file) await writeFile(file, `${JSON.stringify({ bundleId, revisionIds }, null, 2)}\n`);
+}
+
+/** Qualio's reporter, from this action, next to the tests (Playwright transpiles it there like the tests). */
+async function installReporter(dir) {
+  const target = path.join(dir, '.qualio', 'qualio-reporter.ts');
+  await mkdir(path.dirname(target), { recursive: true });
+  await copyFile(path.join(actionDir, 'runtime', 'qualio-reporter.ts'), target);
+  return target;
+}
+
+/** The pull request number of a pull_request job, else null. */
+async function eventPrNumber() {
+  if (!/^pull_request/.test(process.env.GITHUB_EVENT_NAME ?? '') || !process.env.GITHUB_EVENT_PATH) return null;
+  try {
+    return JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8')).pull_request?.number ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The tests folder for this branch: qualio.yml's tests.path when it sets it, else the action's
+ * working-directory input, else the project's folder in Qualio. Relative to the repository root.
+ */
+async function testsFolder(branch, input) {
+  // Without Qualio (no api-key) the tests run where the input says, unreported.
+  if (!apiKey || !apiUrl) return { rel: input || 'e2e', abs: path.resolve(workspace(), input || 'e2e'), moving: false, offline: true };
+  const { status, body } = await call('/v1/tests/prepare', { branch });
+  if (status !== 200) throw new Error(`Asking Qualio for the tests folder failed (${status}): ${body.error ?? 'unknown error'}`);
+  const rel = body.managed ? body.testsDir : (input || body.testsDir);
+  const abs = path.resolve(workspace(), rel);
+  if (abs !== workspace() && !abs.startsWith(workspace() + path.sep)) throw new Error(`The tests folder ${rel} is outside the repository.`);
+  return { rel, abs, moving: Boolean(body.moving) };
+}
+
+const exists = (p) => stat(p).then(() => true, () => false);
+
 /** Replaces the folder's files with `files`, keeping the installed dependencies. */
 async function writeFiles(dir, files) {
   await mkdir(dir, { recursive: true });
@@ -72,69 +165,6 @@ async function writeFiles(dir, files) {
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, file.content);
   }
-}
-
-/** Runs git in the checked-out repository; never throws. */
-function git(args) {
-  return new Promise((resolve) => {
-    execFile('git', args, { cwd: process.env.GITHUB_WORKSPACE || process.cwd(), maxBuffer: 1 << 20, timeout: 120_000 }, (error, stdout) =>
-      resolve({ code: error ? (typeof error.code === 'number' ? error.code : 128) : 0, stdout: String(stdout ?? '').trim() }),
-    );
-  });
-}
-
-/**
- * Which of `merges` ({ number, sha }: pull requests merged into the target branch that changed the
- * main tests) the checked-out code doesn't contain. Their tests expect changes this code doesn't
- * have yet, so Qualio serves the tests from before them. Null when it can't tell (no git, no
- * history): the latest tests are used, as before.
- */
-async function lackingMerges(merges) {
-  if ((await git(['rev-parse', '--is-inside-work-tree'])).stdout !== 'true') return null;
-  // A pull_request job checks out the pull request merged with the current base: it has every merge.
-  if (/^pull_request/.test(process.env.GITHUB_EVENT_NAME ?? '') && process.env.GITHUB_EVENT_PATH) {
-    try {
-      const head = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8')).pull_request?.head?.sha;
-      if (head && (await git(['rev-parse', 'HEAD'])).stdout !== head) return [];
-    } catch {}
-  }
-  // actions/checkout fetches one commit: get the history (commits and trees only, no file contents).
-  if ((await git(['rev-parse', '--is-shallow-repository'])).stdout === 'true' && (await git(['fetch', '--quiet', '--no-tags', '--filter=blob:none', '--unshallow', 'origin'])).code !== 0)
-    return null;
-  const lacking = [];
-  for (const { number, sha } of merges) {
-    if (!/^[0-9a-f]{7,64}$/.test(sha)) continue;
-    let { code } = await git(['merge-base', '--is-ancestor', sha, 'HEAD']);
-    if (code > 1 && (await git(['fetch', '--quiet', '--no-tags', '--filter=blob:none', 'origin', sha])).code === 0) code = (await git(['merge-base', '--is-ancestor', sha, 'HEAD'])).code;
-    // 1: not an ancestor. Anything else (a commit GitHub no longer has): don't count it.
-    if (code === 1) lacking.push(number);
-  }
-  return lacking;
-}
-
-async function download(dir, branch) {
-  let { status, body } = await call('/v1/tests/bundle', { branch });
-  if (status === 200 && body.merges?.length) {
-    const lacking = await lackingMerges(body.merges);
-    if (lacking === null) console.log('::notice title=Qualio::Could not check which merged pull requests this commit includes (no git history), so the latest tests are used.');
-    else if (lacking.length) ({ status, body } = await call('/v1/tests/bundle', { branch, lacking }));
-  }
-  if (status === 404) {
-    console.log(`::notice title=Qualio::${body.error ?? 'This project has no tests yet.'}`);
-    return output({ found: 'false' });
-  }
-  if (status !== 200) throw new Error(`Downloading the tests failed (${status}): ${body.error ?? 'unknown error'}`);
-  await writeFiles(dir, body.files);
-  console.log(`Downloaded ${body.files.length} files of the tests for ${branch} (bundle ${body.bundleId}).`);
-  if (body.lacking?.length) {
-    const refs = body.lacking.map((n) => `#${n}`);
-    const list = refs.length === 1 ? refs[0] : `${refs.slice(0, -1).join(', ')} and ${refs.at(-1)}`;
-    console.log(`::warning title=Qualio::This branch doesn't include ${list} yet, so the tests from before ${refs.length === 1 ? 'it' : 'them'} run and failures aren't healed. Merge or rebase the target branch to run the latest tests.`);
-  }
-  // Tickets this pull request names whose tests Qualio hasn't written yet: Qualio runs the workflow again once they are.
-  for (const { key, reason } of body.pending ?? [])
-    console.log(`::notice title=Qualio::${key} has no tests in this run yet: ${reason}. Qualio runs this workflow again once they are written.`);
-  await output({ found: 'true', 'bundle-id': body.bundleId });
 }
 
 /** Runs a command with the job's output; resolves with its exit code. */
@@ -160,7 +190,7 @@ async function install(dir) {
   chromiumInstalled = true;
 }
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 
 // Job summary blocks, as Qualio writes them on GitHub (@qualio/shared/github-markdown in qualio-webapp).
 const alert = (kind, body) => [`> [!${kind}]`, ...body.trim().split('\n').map((line) => (line.trim() ? `> ${line}` : '>'))].join('\n');
@@ -181,7 +211,7 @@ async function summary(lines) {
  * and runs them (reported as round <check>) until Qualio has repaired or dropped every failing test.
  * Outputs state: ready (it already had one), completed (set up now).
  */
-async function setup(testsDir, mapDir, branch, minutes) {
+async function setup(mapDir, branch, minutes, input = '') {
   const start = await call('/v1/setup/start', { branch, ghRunId: process.env.GITHUB_RUN_ID || '0' });
   if (start.status !== 200) throw new Error(`Starting the setup failed (${start.status}): ${start.body.error ?? 'unknown error'}`);
   let state = start.body;
@@ -210,9 +240,16 @@ async function setup(testsDir, mapDir, branch, minutes) {
       if (state.round <= checked) throw new Error(`The results of check ${checked} did not reach Qualio. Check the [qualio] lines in its output.`);
       checked = state.round;
       console.log(`::group::Check ${checked}: run the generated tests`);
-      const bundle = await call('/v1/tests/bundle', { branch, suiteId });
-      if (bundle.status !== 200) throw new Error(`Downloading the tests to check failed (${bundle.status}): ${bundle.body.error ?? 'unknown error'}`);
-      await writeFiles(testsDir, bundle.body.files);
+      // The suite's tests, written into the tests folder of this checkout (never committed by this job).
+      const folder = await testsFolder(branch, input);
+      const testsDir = folder.abs;
+      await mkdir(testsDir, { recursive: true });
+      const has = (await testFiles(testsDir)).map((f) => f.path);
+      const changes = await call('/v1/tests/changes', { branch, suiteId, has });
+      if (changes.status !== 200) throw new Error(`Getting the tests to check failed (${changes.status}): ${changes.body.error ?? 'unknown error'}`);
+      await applyFiles(testsDir, changes.body.files);
+      await writeManifest(`suite-${suiteId}-${checked}`, changes.body.revisionIds);
+      process.env.QUALIO_REPORTER = await installReporter(testsDir);
       await install(testsDir);
       // Failures are expected here: Qualio repairs those tests (or drops them) and the next check runs.
       // No retries and a short test timeout: a retry tells Qualio nothing new and only costs the job's time.
@@ -221,11 +258,11 @@ async function setup(testsDir, mapDir, branch, minutes) {
     } else if (state.state === 'done') {
       const result = state.result ?? { tests: 0, features: 0, dropped: [] };
       const counts = `${plural(result.tests, 'test')} across ${plural(result.features, 'feature')}`;
-      console.log(`The first test suite is ready: ${counts}, all passing.`);
+      console.log(`The first test suite is ready: ${counts}, all passing. Qualio opens a pull request into ${branch} that adds them to the repository.`);
       await summary([
         '### 🎉 Qualio: first test suite ready',
         '',
-        alert('TIP', `✅ ${counts}, all passing in this job (check ${state.round}).${state.url ? ` [Open it in Qualio](${state.url})` : ''}`),
+        alert('TIP', `✅ ${counts}, all passing in this job (check ${state.round}). Qualio opens a pull request into \`${branch}\` that adds them: merge it, then this one.${state.url ? ` [Open it in Qualio](${state.url})` : ''}`),
         ...(result.dropped.length
           ? [
               '',
@@ -252,16 +289,87 @@ async function setup(testsDir, mapDir, branch, minutes) {
   }
 }
 
-async function promote(branch, merged, baseBranch) {
-  const { status, body } = await call('/v1/tests/promote', { branch, merged: merged === 'true', baseBranch: baseBranch || null });
-  if (status !== 200) throw new Error(`Telling Qualio the pull request closed failed (${status}): ${body.error ?? 'unknown error'}`);
-  if (merged !== 'true') console.log(`Dropped ${body.discarded} heal(s) made on ${branch}.`);
-  else if (body.held)
-    console.log(`::warning title=Qualio::The latest run on ${branch} did not pass, so its tests were not added to the main tests. Promote or discard them on the pull request's page in Qualio.`);
-  else {
-    console.log(body.promoted.length ? `Qualio's heals from ${branch} are now the main tests: ${body.promoted.join(', ')}.` : `No heals were made on ${branch}.`);
-    if (body.skipped.length) console.log(`::warning title=Qualio::Not applied because the main tests changed them since: ${body.skipped.join(', ')}.`);
+/**
+ * Gets the tests ready to run: finds the tests folder, sends Qualio a snapshot of it (hashes, and the
+ * contents Qualio doesn't have yet), and writes the changes Qualio offers on the branch on top (its
+ * verified fixes and new tests: they run here before they're suggested, and while they wait to be
+ * committed). A project whose tests Qualio still kept gets the whole folder until the move is merged.
+ * Outputs dir (absolute), run (true/false).
+ */
+async function prepare(branch, input = '') {
+  if (process.env.SETUP_STATE === 'completed') return output({ run: 'false', dir: '' });
+  const folder = await testsFolder(branch, input);
+  const dir = folder.abs;
+  const hasConfig = (await exists(path.join(dir, 'package.json'))) && ((await exists(path.join(dir, 'playwright.config.ts'))) || (await exists(path.join(dir, 'playwright.config.js'))));
+  if (!(await exists(dir)) && folder.moving) {
+    // Qualio still keeps this project's tests: run them from Qualio while the move pull request waits.
+    const { status, body } = await call('/v1/tests/changes', { branch, whole: true });
+    if (status === 404) {
+      console.log(`::notice title=Qualio::${body.error ?? 'This project has no tests yet.'}`);
+      return output({ run: 'false', dir });
+    }
+    if (status !== 200) throw new Error(`Getting the tests from Qualio failed (${status}): ${body.error ?? 'unknown error'}`);
+    await writeFiles(dir, body.files);
+    await writeManifest('move', body.revisionIds);
+    process.env.QUALIO_REPORTER = await installReporter(dir);
+    console.log(`::notice title=Qualio::Your E2E tests now live in your repository (${folder.rel}). Until Qualio's pull request that adds them is merged, this job runs them from Qualio.`);
+    await output({ reporter: process.env.QUALIO_REPORTER, mode: 'move' });
+    return output({ run: 'true', dir });
   }
+  const missing = !(await exists(dir));
+  // Offline (no api-key) there is nothing else to run; with Qualio, its changes may bring the folder (the
+  // first suite or new tests in a Qualio pull request not merged yet).
+  if (missing && folder.offline) throw new Error(missingFolder(folder.rel));
+  if (!missing && !hasConfig) throw new Error(`'${folder.rel}' has no package.json and playwright.config.ts. Is tests.path the folder that holds your E2E tests?`);
+
+  if (folder.offline) {
+    await output({ mode: 'repo', reporter: '' });
+    return output({ run: 'true', dir });
+  }
+  const files = missing ? [] : await testFiles(dir);
+  const request = {
+    branch,
+    prNumber: await eventPrNumber(),
+    headSha: process.env.QUALIO_COMMIT_SHA || process.env.GITHUB_SHA || '0000000',
+    testsDir: folder.rel,
+    files: files.map((f) => ({ path: f.path, sha256: sha256(f.content) })),
+  };
+  let { status, body } = await call('/v1/tests/snapshot', request);
+  if (status === 200 && body.state === 'contents') {
+    // Only the contents Qualio doesn't have yet travel.
+    const missing = new Set(body.missing);
+    ({ status, body } = await call('/v1/tests/snapshot', { ...request, files: files.map((f) => ({ path: f.path, sha256: sha256(f.content), ...(missing.has(sha256(f.content)) && { content: f.content }) })) }));
+  }
+  if (status !== 200 || body.state !== 'stored') throw new Error(`Sending the tests folder to Qualio failed (${status}): ${body.error ?? 'unknown error'}`);
+  if (body.committed) console.log(`Qualio sees ${plural(body.committed, 'of its changes')} committed on ${branch}.`);
+  if (body.outdated) console.log(`::notice title=Qualio::${plural(body.outdated, 'of Qualio\'s changes')} no longer fit (the lines changed since): Qualio looks again if the tests fail.`);
+  if (missing && !body.files.some((f) => f.path === 'package.json' && f.content !== null)) throw new Error(missingFolder(folder.rel));
+  if (body.files.length) {
+    await applyFiles(dir, body.files);
+    console.log(`Applied ${plural(body.revisionIds.length, 'change')} Qualio offers on ${branch} (${plural(body.files.length, 'file')}): they run here before they're committed.`);
+  }
+  await writeManifest('repo', body.revisionIds);
+  for (const { key, reason } of body.pending ?? [])
+    console.log(`::notice title=Qualio::${key} has no tests in this run yet: ${reason}. Qualio runs this workflow again once they are written.`);
+  process.env.QUALIO_REPORTER = await installReporter(dir);
+  await output({ reporter: process.env.QUALIO_REPORTER, mode: 'repo' });
+  await output({ run: 'true', dir });
+}
+
+function missingFolder(rel) {
+  return `The tests folder '${rel}' does not exist. Set tests.path in qualio.yml's config to the folder that holds your E2E tests (with package.json and playwright.config.ts), and check out the repository first with actions/checkout.`;
+}
+
+/** After a heal: writes the branch's changes (now with the fix) on top of the tests folder for the re-run. */
+async function apply(dir, branch, mode = 'repo') {
+  const { status, body } = await call('/v1/tests/changes', { branch, ...(mode === 'move' && { whole: true }) });
+  if (status !== 200) throw new Error(`Getting Qualio's fix failed (${status}): ${body.error ?? 'unknown error'}`);
+  if (body.replace) await writeFiles(dir, body.files);
+  else await applyFiles(dir, body.files);
+  await writeManifest(body.replace ? 'move' : 'repo', body.revisionIds);
+  // The reporter stays where prepare put it (writeFiles keeps .qualio only for repo folders): put it back.
+  if (body.replace) await installReporter(dir);
+  console.log(`Applied Qualio's fix (${plural(body.files.length, 'file')}) for the re-run. It is suggested on the pull request once the tests pass.`);
 }
 
 async function wait(runFile, minutes) {
@@ -377,36 +485,256 @@ async function deliverReport(repo, item) {
   return r.status >= 200 && r.status < 300 ? { commentId: r.data?.id ?? null } : { failed: r };
 }
 
+const encodePath = (p) => p.split('/').map(encodeURIComponent).join('/');
+const ok = (r) => r.status >= 200 && r.status < 300;
+
+/** A file's contents at a commit, or null when it doesn't exist there. Throws on other errors. */
+async function fileAt(repo, file, ref) {
+  const r = await github('GET', `${repo}/contents/${encodePath(file)}?ref=${encodeURIComponent(ref)}`);
+  if (r.status === 404) return null;
+  if (!ok(r)) throw Object.assign(new Error(`GitHub ${r.status}: ${r.message}`), { status: r.status });
+  if (Array.isArray(r.data) || r.data?.type !== 'file') return null;
+  if (r.data.encoding === 'base64') return Buffer.from(r.data.content ?? '', 'base64').toString('utf8');
+  // Over 1 MB GitHub sends no content: read the blob.
+  const blob = await github('GET', `${repo}/git/blobs/${r.data.sha}`);
+  if (!ok(blob)) throw Object.assign(new Error(`GitHub ${blob.status}: ${blob.message}`), { status: blob.status });
+  return Buffer.from(blob.data.content ?? '', 'base64').toString('utf8');
+}
+
+/** The lines each file of a pull request's diff shows (right side), by path. */
+async function pullRequestLines(repo, number) {
+  const byPath = new Map();
+  for (let page = 1; page <= 30; page++) {
+    const r = await github('GET', `${repo}/pulls/${number}/files?per_page=100&page=${page}`);
+    if (!ok(r) || !Array.isArray(r.data)) break;
+    for (const f of r.data) if (f.patch) byPath.set(f.filename, commentableLines(f.patch));
+    if (r.data.length < 100) break;
+  }
+  return byPath;
+}
+
+/**
+ * Suggestions on the pull request for the changes that are edits of lines its diff shows: one review with
+ * a ```suggestion per hunk. A change with a hunk GitHub can't anchor (outside the diff, a new or deleted
+ * file, a file that changed since) isn't suggested: it goes to the Qualio pull request whole.
+ */
+async function suggest(repo, p, changes) {
+  const pr = await github('GET', `${repo}/pulls/${p.prNumber}`);
+  if (!ok(pr)) return { suggested: [] };
+  const head = pr.data.head.sha;
+  const diff = await pullRequestLines(repo, p.prNumber);
+  const comments = [];
+  const suggested = [];
+  for (const change of changes) {
+    const own = [];
+    let fits = true;
+    for (const f of change.files) {
+      const file = path.posix.join(p.testsDir, f.path);
+      if (f.content === null || f.baseSha256 === null || !diff.has(file)) {
+        fits = false;
+        break;
+      }
+      const current = await fileAt(repo, file, head).catch(() => null);
+      if (current === null || sha256(current) !== f.baseSha256) {
+        fits = false;
+        break;
+      }
+      const found = suggestionComments(file, current, f.content, diff.get(file));
+      if (!found) {
+        fits = false;
+        break;
+      }
+      own.push(...found);
+    }
+    if (!fits || !own.length) continue;
+    own.forEach((c, i) => {
+      const { suggestion, ...anchor } = c;
+      const intro = i === 0 ? `${change.body}\n\n` : `${change.title} (${i + 1}/${own.length})\n\n`;
+      comments.push({ ...anchor, body: `**Qualio AI:** ${intro}${suggestionBlock(suggestion)}\n\n<!-- qualio:suggestion ${change.id} ${i} -->` });
+    });
+    suggested.push({ id: change.id, count: own.length });
+  }
+  if (!comments.length) return { suggested: [] };
+  const review = await github('POST', `${repo}/pulls/${p.prNumber}/reviews`, {
+    commit_id: head,
+    event: 'COMMENT',
+    body: `**Qualio AI:** ${plural(suggested.length, 'verified fix', 'verified fixes')} for the E2E tests. Each passed in this pull request's Qualio job: commit the suggestion to keep the tests in step.${p.pageUrl ? ` [Open in Qualio](${p.pageUrl})` : ''}`,
+    comments,
+  });
+  if (!ok(review)) {
+    console.log(`Qualio's suggestions were not posted (GitHub ${review.status}: ${review.message}); they go to the Qualio pull request instead.`);
+    return { suggested: [], denied: review.status === 403 };
+  }
+  return { suggested: suggested.map((s) => ({ id: s.id, via: 'suggestion', reviewId: review.data?.id ?? null })) };
+}
+
+/** The open pull request from `head` into `base`, if there is one. */
+async function findPullRequest(repo, head, base) {
+  const owner = (process.env.GITHUB_REPOSITORY ?? '').split('/')[0];
+  const r = await github('GET', `${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}&base=${encodeURIComponent(base)}`);
+  return ok(r) && Array.isArray(r.data) && r.data[0] ? r.data[0] : null;
+}
+
+/**
+ * The Qualio pull request: its branch (qualio/…) is rebuilt from the base branch's head with one commit per
+ * change, in order, and force-pushed; the pull request into the base branch is opened or updated. A change
+ * whose files the base branch changed otherwise since it was written is left out (a conflict). Only Qualio's
+ * own qualio/* branch is ever pushed.
+ */
+async function qualioPullRequest(repo, p, changes) {
+  const result = { delivered: [], conflicts: [] };
+  const ref = await github('GET', `${repo}/git/ref/heads/${encodePath(p.branch)}`);
+  if (!ok(ref)) return { ...result, failed: ref };
+  const baseSha = ref.data.object.sha;
+  const baseCommit = await github('GET', `${repo}/git/commits/${baseSha}`);
+  if (!ok(baseCommit)) return { ...result, failed: baseCommit };
+  let parent = baseSha;
+  let tree = baseCommit.data.tree.sha;
+  const known = new Map();
+  const current = async (file) => {
+    if (!known.has(file)) known.set(file, await fileAt(repo, file, baseSha));
+    return known.get(file);
+  };
+  for (const change of changes) {
+    const files = change.files.map((f) => ({ ...f, repoPath: path.posix.join(p.testsDir, f.path) }));
+    let conflict = null;
+    let already = true;
+    for (const f of files) {
+      const now = await current(f.repoPath);
+      const nowHash = now === null ? null : sha256(now);
+      const want = f.content === null ? null : sha256(f.content);
+      if (nowHash !== want) already = false;
+      if (nowHash !== f.baseSha256 && nowHash !== want) conflict = f.path;
+    }
+    if (conflict) {
+      result.conflicts.push({ id: change.id, path: conflict });
+      continue;
+    }
+    // The branch has it already (written by hand, or a suggestion committed): nothing to commit.
+    if (already) {
+      result.delivered.push({ id: change.id, via: 'qualio_pr', commitSha: null });
+      continue;
+    }
+    const t = await github('POST', `${repo}/git/trees`, {
+      base_tree: tree,
+      tree: files.map((f) => (f.content === null ? { path: f.repoPath, mode: '100644', type: 'blob', sha: null } : { path: f.repoPath, mode: '100644', type: 'blob', content: f.content })),
+    });
+    if (!ok(t)) return { ...result, failed: t };
+    const c = await github('POST', `${repo}/git/commits`, { message: `${change.message}\n\n${change.body}\n\nqualio-change: ${change.id}`, tree: t.data.sha, parents: [parent] });
+    if (!ok(c)) return { ...result, failed: c };
+    parent = c.data.sha;
+    tree = t.data.sha;
+    for (const f of files) known.set(f.repoPath, f.content);
+    result.delivered.push({ id: change.id, via: 'qualio_pr', commitSha: parent });
+  }
+  if (parent === baseSha) return { ...result, empty: true };
+  const branchRef = `heads/${encodePath(p.qualioBranch)}`;
+  let pushed = await github('PATCH', `${repo}/git/refs/${branchRef}`, { sha: parent, force: true });
+  if (pushed.status === 404 || pushed.status === 422) pushed = await github('POST', `${repo}/git/refs`, { ref: `refs/heads/${p.qualioBranch}`, sha: parent });
+  if (!ok(pushed)) return { ...result, delivered: [], failed: pushed };
+  let pr = p.qualioPr ? await github('PATCH', `${repo}/pulls/${p.qualioPr.number}`, { title: p.title, body: p.body }) : null;
+  if (!pr || !ok(pr)) {
+    const existing = await findPullRequest(repo, p.qualioBranch, p.branch);
+    pr = existing
+      ? await github('PATCH', `${repo}/pulls/${existing.number}`, { title: p.title, body: p.body })
+      : await github('POST', `${repo}/pulls`, { title: p.title, head: p.qualioBranch, base: p.branch, body: p.body, maintainer_can_modify: true });
+  }
+  if (!ok(pr)) {
+    const server = process.env.GITHUB_SERVER_URL || 'https://github.com';
+    const compare = `${server}/${process.env.GITHUB_REPOSITORY}/compare/${encodeURIComponent(p.branch)}...${encodeURIComponent(p.qualioBranch)}?expand=1`;
+    console.log(
+      `::warning title=Qualio::Qualio pushed its changes to ${p.qualioBranch} but could not open the pull request (GitHub ${pr.status}: ${pr.message}). Open it yourself: ${compare}. To let Qualio open it, allow it in Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests".`,
+    );
+    return { ...result, delivered: result.delivered.map((d) => ({ ...d, via: 'report' })), qualioPr: null };
+  }
+  return { ...result, qualioPr: { number: pr.data.number, url: pr.data.html_url, headBranch: p.qualioBranch, headSha: parent, state: 'open' } };
+}
+
+/** Closes the Qualio pull request and deletes its branch (it has nothing left to offer). */
+async function retireQualioPullRequest(repo, p) {
+  await github('PATCH', `${repo}/pulls/${p.qualioPr.number}`, { state: 'closed' });
+  await github('DELETE', `${repo}/git/refs/heads/${encodePath(p.qualioBranch)}`);
+  console.log(`Closed Qualio pull request #${p.qualioPr.number}: it has nothing left to offer.`);
+  return { changes: { retired: p.qualioPr.number } };
+}
+
+/**
+ * Qualio's changes to a branch's tests (specs/tests-in-the-repository.md §5): suggestions on the pull
+ * request where GitHub allows them, the rest as commits in one Qualio pull request into the branch. With
+ * report-only (or without the permission to push qualio/* branches), the report shows them instead.
+ */
+async function deliverTestChanges(repo, item) {
+  const p = item.payload;
+  // A person merged or closed the Qualio pull request since: Qualio records it, then offers what's left.
+  if (p.qualioPr) {
+    const r = await github('GET', `${repo}/pulls/${p.qualioPr.number}`);
+    if (ok(r) && r.data.state === 'closed')
+      return { changes: { qualioPr: { number: r.data.number, url: r.data.html_url, headBranch: p.qualioBranch, headSha: r.data.head?.sha ?? null, state: r.data.merged ? 'merged' : 'closed' } } };
+  }
+  if (p.close) return p.qualioPr ? retireQualioPullRequest(repo, p) : { changes: {} };
+  const delivered = [];
+  let rest = p.changes.filter((c) => c.via !== 'suggestion');
+  if (p.mode === 'REVIEW' && p.prNumber) {
+    const fresh = rest.filter((c) => c.via === null && c.suggest);
+    if (fresh.length) {
+      const { suggested } = await suggest(repo, p, fresh);
+      delivered.push(...suggested);
+      const done = new Set(suggested.map((s) => s.id));
+      rest = rest.filter((c) => !done.has(c.id));
+    }
+  }
+  if (p.mode !== 'REVIEW') {
+    for (const c of rest) if (c.via === null) delivered.push({ id: c.id, via: 'report' });
+    return { changes: { delivered } };
+  }
+  if (!rest.length) return p.qualioPr ? { ...(await retireQualioPullRequest(repo, p)), changes: { delivered, retired: p.qualioPr.number } } : { changes: { delivered } };
+  const built = await qualioPullRequest(repo, p, rest);
+  if (built.failed) {
+    if (built.failed.status === 403 || built.failed.status === 404) {
+      console.log(
+        "::warning title=Qualio::This job's GITHUB_TOKEN can't push Qualio's branch (qualio/*), so Qualio's changes to the tests are shown in its report instead. Add to the workflow: permissions: { contents: write }.",
+      );
+      for (const c of rest) if (c.via === null) delivered.push({ id: c.id, via: 'report' });
+      return { changes: { delivered } };
+    }
+    return { failed: built.failed };
+  }
+  if (built.empty && p.qualioPr) return { ...(await retireQualioPullRequest(repo, p)), changes: { delivered: [...delivered, ...built.delivered], conflicts: built.conflicts, retired: p.qualioPr.number } };
+  if (built.qualioPr) console.log(`Qualio pull request #${built.qualioPr.number} (${p.qualioBranch} → ${p.branch}): ${plural(built.delivered.length, 'change')}.`);
+  return { changes: { delivered: [...delivered, ...built.delivered], conflicts: built.conflicts, qualioPr: built.qualioPr ?? null } };
+}
+
 /** Sends one outbox item. Returns the GitHub call that failed, if one did, and the report comment's id. */
 async function deliver(item) {
   const repo = `/repos/${process.env.GITHUB_REPOSITORY}`;
   if (item.kind === 'REPORT') return deliverReport(repo, item);
+  if (item.kind === 'TEST_CHANGES') return deliverTestChanges(repo, item);
   return { failed: await deliverOne(repo, item) };
 }
 
 async function deliverOne(repo, item) {
   const p = item.payload;
-  const ok = (r) => (r.status >= 200 && r.status < 300 ? null : r);
+  const refused = (r) => (r.status >= 200 && r.status < 300 ? null : r);
   switch (item.kind) {
     case 'COMMENT':
-      return ok(await github('POST', `${repo}/issues/${item.prNumber}/comments`, { body: p.body }));
+      return refused(await github('POST', `${repo}/issues/${item.prNumber}/comments`, { body: p.body }));
     case 'REACTION':
-      return ok(await github('POST', `${repo}/issues/comments/${p.commentId}/reactions`, { content: p.content }));
+      return refused(await github('POST', `${repo}/issues/comments/${p.commentId}/reactions`, { content: p.content }));
     case 'STATUS':
-      return ok(await github('POST', `${repo}/statuses/${item.sha}`, { state: p.state, context: p.context, description: p.description?.slice(0, 140), target_url: p.targetUrl }));
+      return refused(await github('POST', `${repo}/statuses/${item.sha}`, { state: p.state, context: p.context, description: p.description?.slice(0, 140), target_url: p.targetUrl }));
     case 'DISPATCH': {
       // This workflow's own file (owner/repo/.github/workflows/qualio.yml@refs/...), qualio.yml by default.
       const file = /\/([^/@]+\.ya?ml)@/.exec(process.env.GITHUB_WORKFLOW_REF ?? '')?.[1] ?? 'qualio.yml';
-      return ok(await github('POST', `${repo}/actions/workflows/${file}/dispatches`, { ref: p.ref }));
+      return refused(await github('POST', `${repo}/actions/workflows/${file}/dispatches`, { ref: p.ref }));
     }
     case 'LABEL': {
       if (p.add?.length) {
-        const failed = ok(await github('POST', `${repo}/issues/${item.prNumber}/labels`, { labels: p.add }));
+        const failed = refused(await github('POST', `${repo}/issues/${item.prNumber}/labels`, { labels: p.add }));
         if (failed) return failed;
       }
       for (const name of p.remove ?? []) {
         const r = await github('DELETE', `${repo}/issues/${item.prNumber}/labels/${encodeURIComponent(name)}`);
-        if (r.status !== 404 && ok(r)) return r;
+        if (r.status !== 404 && refused(r)) return r;
       }
       return null;
     }
@@ -420,14 +748,14 @@ async function sendBatch(items) {
   let sent = 0;
   let denied = false;
   for (const item of items) {
-    const { failed, commentId } = await deliver(item);
+    const { failed, commentId, changes } = await deliver(item);
     // Missing token permissions, rate limits and GitHub outages are retried by the next job.
     if (failed && (failed.status === 0 || failed.status === 403 || failed.status === 429 || failed.status >= 500)) {
       denied ||= failed.status === 403;
       console.log(`Not sent yet (${item.kind}, GitHub ${failed.status || 'unreachable'}): ${failed.message}`);
       continue;
     }
-    await call(`/v1/pr/outbox/${item.id}/ack`, { error: failed ? `GitHub ${failed.status}: ${failed.message}` : null, ...(commentId && { commentId }) });
+    await call(`/v1/pr/outbox/${item.id}/ack`, { error: failed ? `GitHub ${failed.status}: ${failed.message}` : null, ...(commentId && { commentId }), ...(changes && !failed && { changes }) });
     if (!failed) sent += 1;
     else console.log(`GitHub refused an update (${item.kind}, ${failed.status}): ${failed.message}`);
   }
@@ -448,7 +776,8 @@ async function outbox(waitMinutes = '0') {
   let quiet = 0;
   for (;;) {
     // report: this action edits Qualio's one report comment in place and reacts to commands.
-    const { status, body } = await call('/v1/pr/outbox', { report: true });
+    // changes: this action offers Qualio's changes to the tests (suggestions, the Qualio pull request).
+    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true });
     if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
     const batch = await sendBatch(body.items);
     sent += batch.sent;
@@ -460,7 +789,7 @@ async function outbox(waitMinutes = '0') {
   }
   if (sent) console.log(`Sent ${sent} update(s) from Qualio to GitHub.`);
   if (denied)
-    console.log("::warning title=Qualio::This job's GITHUB_TOKEN may not write comments, statuses or dispatch workflows. Add to the workflow: permissions: { contents: read, pull-requests: write, issues: write, statuses: write, actions: write }.");
+    console.log("::warning title=Qualio::This job's GITHUB_TOKEN may not write comments, statuses or dispatch workflows. Add to the workflow: permissions: { contents: write, pull-requests: write, issues: write, statuses: write, actions: write }.");
 }
 
 /**
@@ -482,7 +811,6 @@ async function comment() {
 }
 
 const OVERVIEW_EXTENSIONS = ['.md', '.markdown', '.txt'];
-const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
 /** The overview documents a config names: files, or the .md/.txt files of folders (recursively), inside the checkout. */
 async function overviewFiles(paths, { known, maxFiles, maxBytes }) {
@@ -591,9 +919,9 @@ async function errored(conclusion) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-const commands = { setup, download, promote, wait, sync, config, outbox, errored, comment };
+const commands = { setup, prepare, apply, wait, sync, config, outbox, errored, comment };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use setup, download, promote, wait, sync, config, outbox, errored or comment.`);
+  console.error(`Unknown command "${command}". Use setup, prepare, apply, wait, sync, config, outbox, errored or comment.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {
