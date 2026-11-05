@@ -244,6 +244,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
 | `setup-wait-minutes` | `25` | The first run (no test suite yet) maps the app and checks the generated tests in the job. How long that may take before the job gives up; a re-run continues where it stopped. Keep it a few minutes under the job's `timeout-minutes`. |
 | `heal-wait-minutes` | `10` | How long to wait for Qualio's heal of a failed run before giving up on the re-run. |
+| `live-diagnosis` | `true` | While Qualio diagnoses failed tests, let it look at the running app from this job (see *Live diagnosis* below). `false` turns it off. |
 | `node-version` | `20` | The Node.js version. |
 | `upload-report` | `true` | Keep Playwright's HTML report as the `playwright-report` artifact. |
 | `report-retention-days` | `14` | Days to keep the report artifact. |
@@ -301,6 +302,8 @@ The step **Sync the Qualio config** sends the YAML, then the overview documents 
 7. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise) and Chromium, caching the browser per Playwright version.
 8. Runs `npx playwright test` with `QUALIO_API_URL`, `QUALIO_API_KEY`, `QUALIO_BASE_URL`, `QUALIO_COMMIT_SHA`, `QUALIO_RUN_MANIFEST` (the changes it applied) and `QUALIO_REPORTER` (Qualio's reporter, which this action brings: the generated `playwright.config.ts` adds it).
 9. If tests fail, waits up to `heal-wait-minutes` for Qualio's verdict (`POST /v1/tests/heal/status`). When Qualio patched the tests, writes the fix on top (`/v1/tests/changes`) and runs them again; the job's result is the re-run's. Real application bugs are never healed, so the job fails. When the verdict is `proposed` (the self-healing level asks first), the job fails with a link: accept the fix in Qualio (it is then checked by the next run and suggested), or mark it as a bug.
+
+**Live diagnosis.** While step 9 waits, Qualio may ask to see pages of your running app, for example to check whether a button was renamed or removed. Qualio never reaches your app; this job does it for Qualio. It starts Playwright MCP (`@playwright/mcp`, pinned, run with `npx`) on the Chromium your tests' Playwright already installed. It opens only the paths Qualio asks for on `base-url`'s origin, signed out or signed in as a role with that role's `E2E_<ROLE>_USERNAME`/`_PASSWORD` secrets. The secrets stay in the job and are passed only to the browser. Each page's accessibility snapshot is sent back, and a page that redirects to another site is not. Nothing is clicked or filled in beyond the sign-in, and the browser process gets no other secrets (not `api-key` or `GITHUB_TOKEN`). The job log lists every page shown. Set `live-diagnosis: false` to turn it off.
 10. Uploads Playwright's HTML report as the `playwright-report` artifact and writes a job summary with the result and a link to the run in Qualio. A job that fails before the reporter sent results tells Qualio (`POST /v1/runs/errored`).
 
 Test account secrets (`E2E_<ROLE>_…`) are not inputs: set them in the job's `env`, which the action's steps inherit. The action never prints the API key.

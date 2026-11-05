@@ -12,7 +12,9 @@
 //     mapper, and checks the suite twice: the first check fails, the "repaired" second one passes;
 //     "changes": Qualio offers three changes on pull request #7 (one fits a suggestion, one is outside
 //     the diff, one adds a file); "move": the project's tests are still in Qualio, so a job without the
-//     tests folder gets the whole folder)
+//     tests folder gets the whole folder; "live": the heal looks at the running app through the job's
+//     browser host (live diagnosis): five calls, two fine and three the host must refuse, then the heal
+//     ends not_healable; GET /__browser lists the host's answers)
 import { createHash } from 'node:crypto';
 import http from 'node:http';
 
@@ -43,6 +45,17 @@ const outbox =
     : [];
 const calls = [];
 let healPolls = 0;
+// "live": what the Runner asks the job's browser to show, and what the host answered.
+const LIVE_ROLES = [{ role: 'Admin', usernameEnv: 'E2E_ADMIN_USERNAME', passwordEnv: 'E2E_ADMIN_PASSWORD' }];
+const browserQueue = [
+  { id: 'b1', tool: 'open', args: { path: '/classes', role: 'Admin' } },
+  { id: 'b2', tool: 'open', args: { path: '/login', role: null } },
+  { id: 'b3', tool: 'open', args: { path: 'https://evil.test/', role: null } },
+  { id: 'b4', tool: 'open', args: { path: '/away', role: null } },
+  { id: 'b5', tool: 'evaluate', args: { code: 'document.cookie' } },
+  { id: 'b6', tool: 'open', args: { path: '/x', role: 'Owner' } },
+];
+const browserAnswers = [];
 let healed = false;
 // Setup mode: map → wait → check 1 (fails) → wait → check 2 (passes) → done.
 const setup = { mapped: false, round: 0, reported: 0, passed: false, polls: 0 };
@@ -142,6 +155,7 @@ function setupStatus() {
 http
   .createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/__calls') return res.end(JSON.stringify(calls));
+    if (req.method === 'GET' && req.url === '/__browser') return res.end(JSON.stringify(browserAnswers));
     if (req.method === 'GET' && req.url === '/__outbox') return res.end(JSON.stringify(outbox));
     if (req.method === 'GET' && req.url === '/__github') return res.end(JSON.stringify(github));
     const chunks = [];
@@ -228,6 +242,25 @@ http
           }),
         );
       return res.end(JSON.stringify({ replace: false, revisionIds: healed || healedNow ? ['r2'] : [], files: healed || healedNow ? [{ path: 'tests/login.spec.ts', content: spec('Log in') }] : [], pending: [] }));
+    }
+    if (req.url === '/v1/tests/heal/status' && mode === 'live') {
+      // Running until the host answered every call; the session is offered only to a job that can host it.
+      // A job that offers no browser gets the heal's end at once.
+      const finished = !body.browser || browserAnswers.length >= browserQueue.length;
+      return res.end(JSON.stringify({ status: finished ? 'not_healable' : 'running', ...(!finished && body.browser && { browser: { sessionId: 'live1', roles: LIVE_ROLES } }) }));
+    }
+    if (req.url === '/v1/browser/next') {
+      if (body.sessionId !== 'live1') return res.writeHead(404).end(JSON.stringify({ error: 'Browser session not found' }));
+      const next = browserQueue.find((c) => !c.taken);
+      if (next) {
+        next.taken = true;
+        return res.end(JSON.stringify({ call: { id: next.id, tool: next.tool, args: next.args } }));
+      }
+      return res.end(JSON.stringify(browserAnswers.length >= browserQueue.length ? { done: true } : { idle: true }));
+    }
+    if (req.url === '/v1/browser/result') {
+      browserAnswers.push(body);
+      return res.end(JSON.stringify({ ok: true }));
     }
     if (req.url === '/v1/tests/heal/status') {
       healPolls += 1;

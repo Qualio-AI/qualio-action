@@ -7,7 +7,9 @@
 //                                                finds the tests folder (qualio.yml tests.path), sends Qualio a
 //                                                snapshot of it, and writes the changes Qualio offers on top
 //   node qualio.mjs apply <dir> <branch>         after a heal: writes the branch's changes (the fix) on top again
-//   node qualio.mjs wait <run-file> <minutes>    waits for the heal of the run the reporter wrote
+//   node qualio.mjs wait <run-file> <minutes>    waits for the heal of the run the reporter wrote; meanwhile hosts a
+//                                                browser on the app for Qualio's diagnosis (live diagnosis, see
+//                                                browser-host.mjs; QUALIO_LIVE_DIAGNOSIS=false turns it off)
 //   node qualio.mjs sync                         tells Qualio about this pull request (title, branch, head, merged)
 //   node qualio.mjs config <branch>              sends qualio.yml's config (CONFIG or CONFIG_FILE) and the overview
 //                                                documents it names; fails the job when the config is invalid
@@ -24,8 +26,10 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFile, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startBrowserHost } from './browser-host.mjs';
 import { commentableLines, suggestionBlock, suggestionComments } from './diff.mjs';
 
 const apiUrl = (process.env.QUALIO_API_URL ?? '').replace(/\/+$/, '');
@@ -383,20 +387,50 @@ async function wait(runFile, minutes) {
   if (run.status !== 'FAILED' || run.heal !== 'queued') return output({ status: run.status === 'FAILED' ? 'none' : 'passed' });
   const deadline = Date.now() + Number(minutes) * 60_000;
   console.log(`Waiting up to ${minutes} minute(s) for Qualio to diagnose the failures…`);
-  for (;;) {
-    const { status, body } = await call('/v1/tests/heal/status', { runId: run.runId });
-    if (status !== 200) throw new Error(`Reading the heal status failed (${status}): ${body.error ?? 'unknown error'}`);
-    if (body.status !== 'queued' && body.status !== 'running') {
-      // proposed: the project asks first; a person accepts the change or calls it a bug in Qualio.
-      console.log(body.status === 'proposed' ? 'Heal: proposed. Qualio waits for someone to accept the UI change or mark it as a bug.' : `Heal: ${body.status}.`);
-      return output({ status: body.status });
+  const live = liveDiagnosis();
+  let host = null;
+  try {
+    for (;;) {
+      const { status, body } = await call('/v1/tests/heal/status', { runId: run.runId, ...(live && { browser: true }) });
+      if (status !== 200) throw new Error(`Reading the heal status failed (${status}): ${body.error ?? 'unknown error'}`);
+      if (body.status !== 'queued' && body.status !== 'running') {
+        // proposed: the project asks first; a person accepts the change or calls it a bug in Qualio.
+        console.log(body.status === 'proposed' ? 'Heal: proposed. Qualio waits for someone to accept the UI change or mark it as a bug.' : `Heal: ${body.status}.`);
+        return output({ status: body.status });
+      }
+      // Live diagnosis: Qualio may look at the running app through this job while it diagnoses.
+      if (live && body.browser && !host) {
+        console.log("Qualio can look at the running app from this job while it diagnoses (live diagnosis: pages are only opened, never clicked or filled in).");
+        host = startBrowserHost(body.browser, { call, ...live });
+      }
+      if (Date.now() >= deadline) {
+        console.log('::warning title=Qualio::Qualio is still diagnosing the failures. Re-run the workflow later to pick up a fix.');
+        return output({ status: 'timeout' });
+      }
+      await new Promise((r) => setTimeout(r, POLL_MS));
     }
-    if (Date.now() >= deadline) {
-      console.log('::warning title=Qualio::Qualio is still diagnosing the failures. Re-run the workflow later to pick up a fix.');
-      return output({ status: 'timeout' });
+  } finally {
+    if (host) {
+      await host.stop();
+      if (host.stats.opened || host.stats.failed) console.log(`Live diagnosis: Qualio looked at ${plural(host.stats.opened, 'page')} of the running app${host.stats.failed ? ` (${host.stats.failed} couldn't be shown)` : ''}.`);
     }
-    await new Promise((r) => setTimeout(r, POLL_MS));
   }
+}
+
+/**
+ * Whether this job can host a browser on the app for Qualio's diagnosis: the action's live-diagnosis
+ * input (on by default), the app's URL, and the tests folder (its Playwright's Chromium is used).
+ */
+function liveDiagnosis() {
+  const baseUrl = process.env.QUALIO_BASE_URL;
+  const testsDir = process.env.QUALIO_TESTS_DIR;
+  if (process.env.QUALIO_LIVE_DIAGNOSIS === 'false' || !baseUrl || !testsDir) return null;
+  try {
+    if (!/^https?:$/.test(new URL(baseUrl).protocol)) return null;
+  } catch {
+    return null;
+  }
+  return { baseUrl, testsDir, tempDir: path.join(process.env.RUNNER_TEMP || tmpdir(), 'qualio-live') };
 }
 
 async function sync() {
