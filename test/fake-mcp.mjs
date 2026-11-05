@@ -20,6 +20,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     url = params.arguments.url.endsWith('/away') ? 'https://idp.example/login' : params.arguments.url;
     return reply(id, text(`### Ran Playwright code\n\`\`\`js\nawait page.goto('${params.arguments.url}');\n\`\`\`\n### Page\n- Page URL: ${url}`));
   }
+  // A target resolves like Playwright: 'Log in' once, a bare getByRole('link') twice, anything else nowhere.
+  if (params.name === 'browser_snapshot' && params.arguments.target) {
+    const target = params.arguments.target;
+    if (target.includes("'Log in'")) return reply(id, text(`### Page\n- Page URL: ${url}\n### Snapshot\n\`\`\`yaml\n- button "Log in" [ref=e14] [cursor=pointer]\n\`\`\``));
+    if (target === "getByRole('link')")
+      return reply(id, { content: [{ type: 'text', text: `### Error\nError: browserBackend.callTool: Error: strict mode violation: getByRole('link') resolved to 2 elements:\n    1) <a href="/">Home</a> aka getByRole('link', { name: 'Home' })\n    2) <a href="/classes">Courses</a> aka getByRole('link', { name: 'Courses' })\n` }], isError: true });
+    return reply(id, { content: [{ type: 'text', text: `### Error\nError: "${target}" does not match any elements.` }], isError: true });
+  }
   if (params.name === 'browser_snapshot') {
     const who = process.env.QUALIO_SIGNIN_USERNAME ? 'Admin User' : 'nobody';
     return reply(id, text(`### Page\n- Page URL: ${url}\n- Page Title: Fake\n### Snapshot\n\`\`\`yaml\n- banner:\n  - generic: ${who}\n- button "Log in"\n\`\`\``));

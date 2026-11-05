@@ -5,7 +5,9 @@
 // JSON-RPC over stdio is spoken here directly).
 //
 // Look only: the host calls Playwright MCP's browser_navigate and browser_snapshot, nothing else, and
-// only for paths on the app's own origin. Sign-ins happen in code (an --init-page script reading the
+// only for paths on the app's own origin. `check` resolves locators with Playwright's own engine through
+// the snapshot's `target` (Playwright MCP parses locator text; it never evaluates it) and answers how
+// many elements each finds. Sign-ins happen in code (an --init-page script reading the
 // role's E2E_<ROLE>_USERNAME / _PASSWORD from this job's env), so credentials never reach Qualio or a
 // model. The MCP server gets a minimal environment: never the Qualio API key, GITHUB_TOKEN or other
 // secrets.
@@ -42,6 +44,34 @@ exports.default = async ({ page }) => {
     throw new Error('the sign-in form is still shown after signing in with this role\\'s secrets');
 };
 `;
+
+/** Locators per check, as Qualio sends them. */
+export const MAX_LOCATORS = 10;
+
+/**
+ * A locator Qualio may check: Playwright locator code from getBy… (getByRole('button', { name: 'Save' })
+ * and its chains), short, one line, nothing that could run (Playwright MCP parses it, never evaluates
+ * it; this is a second fence).
+ */
+export function checkableLocator(raw) {
+  const l = typeof raw === 'string' ? raw.trim() : '';
+  if (!/^getBy(Role|Label|Placeholder|TestId|Text|AltText|Title)\(/.test(l) || l.length > 300 || /\n|=>|\$\{|\.\s*(evaluate|evaluateAll|evaluateHandle|click|fill|press|type|check|setInputFiles|dispatchEvent)\s*\(/.test(l)) return null;
+  return l;
+}
+
+/** What browser_snapshot's target answered for one locator: how many elements it found. */
+export function locatorCount(locator, answer) {
+  if ('text' in answer) {
+    const line = /```yaml\n(.+)/.exec(answer.text)?.[1] ?? '';
+    const element = line.replace(/^\s*-\s*/, '').replace(/\s*\[(?:ref|cursor|active)[^\]]*\]/g, '').replace(/:\s*$/, '').trim();
+    return { locator, count: 1, element: element || null, suggestions: [], error: null };
+  }
+  const text = answer.error;
+  if (/does not match any elements/.test(text)) return { locator, count: 0, element: null, suggestions: [], error: null };
+  const many = /resolved to (\d+) elements/.exec(text);
+  if (many) return { locator, count: Number(many[1]), element: null, suggestions: [...text.matchAll(/\baka (.+)$/gm)].map((m) => m[1].trim()).slice(0, 5), error: null };
+  return { locator, count: null, element: null, suggestions: [], error: (text.split('\n').find((l) => l.trim() && !l.startsWith('###')) ?? 'error').replace(/^Error:\s*/, '').slice(0, 300) };
+}
 
 /** A path of the application: starts with one slash, no scheme or host. Same rule as Qualio's. */
 export function appPath(raw) {
@@ -105,7 +135,11 @@ class McpServer {
   async tool(name, args) {
     const result = await this.request('tools/call', { name, arguments: args }, CALL_TIMEOUT_MS);
     const text = (result?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
-    if (result?.isError) throw new Error(text.replace(/^### Error\s*/m, '').split('\n').find((l) => l.trim()) ?? 'the browser reported an error');
+    if (result?.isError) {
+      const error = new Error(text.replace(/^### Error\s*/m, '').split('\n').find((l) => l.trim()) ?? 'the browser reported an error');
+      error.full = text;
+      throw error;
+    }
     return text;
   }
 
@@ -128,6 +162,7 @@ function browserExecutable(testsDir) {
   }
 }
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const pageUrl = (text) => /^- Page URL: (\S+)/m.exec(text)?.[1] ?? null;
 
 /** The snapshot as the Runner reads it: the page's URL, title and accessibility tree. */
@@ -176,7 +211,8 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
     return new McpServer(command, args, { env, cwd: dir }).start();
   }
 
-  async function open({ path: rawPath, role }) {
+  /** Opens a path as a role (the app's origin only); the server, ready for more on that page. */
+  async function load({ path: rawPath, role }) {
     const p = appPath(rawPath);
     if (!p) throw new Error('not a path of the application');
     if (role != null && !session.roles.some((r) => r.role === role)) throw new Error(`no "${role}" role`);
@@ -188,13 +224,35 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
     const landed = pageUrl(snapshot);
     // A redirect to another site (an identity provider, say) is not the app: its content stays here.
     if (landed && new URL(landed).origin !== base.origin) throw new Error(`the page redirected away from the application (to ${new URL(landed).origin})`);
-    return pageText(snapshot);
+    return { server, snapshot };
+  }
+
+  async function open(args) {
+    return pageText((await load(args)).snapshot);
+  }
+
+  /** How many elements each locator finds on the page, with Playwright's engine (the snapshot's target). */
+  async function check(args) {
+    const locators = Array.isArray(args.locators) ? args.locators.slice(0, MAX_LOCATORS) : [];
+    if (!locators.length) throw new Error('no locators to check');
+    const { server } = await load(args);
+    const checks = [];
+    for (const raw of locators) {
+      const locator = checkableLocator(raw);
+      if (!locator) {
+        checks.push({ locator: String(raw).slice(0, 300), count: null, element: null, suggestions: [], error: 'not a getBy… locator this job checks' });
+        continue;
+      }
+      const answer = await server.tool('browser_snapshot', { target: locator }).then((text) => ({ text }), (error) => ({ error: error.full ?? error.message }));
+      checks.push(locatorCount(locator, answer));
+    }
+    return JSON.stringify({ checks });
   }
 
   async function answer(c) {
     try {
-      if (c.tool !== 'open') throw new Error(`the tool "${c.tool}" is not allowed`);
-      const result = await open(c.args ?? {});
+      if (c.tool !== 'open' && c.tool !== 'check') throw new Error(`the tool "${c.tool}" is not allowed`);
+      const result = c.tool === 'open' ? await open(c.args ?? {}) : await check(c.args ?? {});
       stats.opened += 1;
       return { result };
     } catch (error) {
@@ -226,7 +284,8 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
       const c = reply.body?.call;
       if (!c) continue;
       const result = await answer(c);
-      log(`Live diagnosis: ${'result' in result ? 'showed' : "couldn't show"} ${c.args?.path ?? '?'} ${c.args?.role ? `as ${c.args.role}` : SIGNED_OUT}${'error' in result ? ` (${result.error})` : ''}.`);
+      const what = c.tool === 'check' ? `checked ${plural(c.args?.locators?.length ?? 0, 'locator')} on` : 'showed';
+      log(`Live diagnosis: ${'result' in result ? what : "couldn't show"} ${c.args?.path ?? '?'} ${c.args?.role ? `as ${c.args.role}` : SIGNED_OUT}${'error' in result ? ` (${result.error})` : ''}.`);
       await call('/v1/browser/result', { sessionId: session.sessionId, callId: c.id, ...result }).catch(() => {});
     }
     await Promise.all([...servers.values()].map((s) => s.then((server) => server.close(), () => {})));

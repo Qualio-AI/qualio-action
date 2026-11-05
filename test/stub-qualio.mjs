@@ -54,6 +54,8 @@ const browserQueue = [
   { id: 'b4', tool: 'open', args: { path: '/away', role: null } },
   { id: 'b5', tool: 'evaluate', args: { code: 'document.cookie' } },
   { id: 'b6', tool: 'open', args: { path: '/x', role: 'Owner' } },
+  // The Healer's check of its locators (one found, two found, none, one that isn't a locator).
+  { id: 'b7', tool: 'check', args: { path: '/login', role: null, locators: ["getByRole('button', { name: 'Log in' })", "getByRole('link')", "getByRole('button', { name: 'Gone' })", 'page.evaluate(() => document.cookie)'] } },
 ];
 const browserAnswers = [];
 let healed = false;

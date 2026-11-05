@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { appPath } from '../scripts/browser-host.mjs';
+import { appPath, checkableLocator, locatorCount } from '../scripts/browser-host.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const children = [];
@@ -73,7 +73,7 @@ test("shows the pages Qualio asks for, signed in by the job, and refuses everyth
   // The job offered a browser, and the heal ended as Qualio said.
   assert.equal(calls.find((c) => c.route === '/v1/tests/heal/status').body.browser, true);
   assert.match(out, /Heal: not_healable/);
-  assert.match(out, /Qualio looked at 2 pages of the running app \(4 couldn't be shown\)/);
+  assert.match(out, /Qualio looked at 3 pages of the running app \(4 couldn't be shown\)/);
 
   // As Admin: signed in by the job (the snapshot shows the user), the page's URL, title and tree.
   assert.match(answers.b1.result, /- Page URL: http:\/\/app\.test:3000\/classes/);
@@ -85,6 +85,13 @@ test("shows the pages Qualio asks for, signed in by the job, and refuses everyth
   assert.match(answers.b4.error, /redirected away from the application \(to https:\/\/idp\.example\)/);
   assert.match(answers.b5.error, /tool "evaluate" is not allowed/);
   assert.match(answers.b6.error, /no "Owner" role/);
+  // The check: one element, two (with Playwright's suggestions), none, and a refused "locator".
+  assert.deepEqual(JSON.parse(answers.b7.result).checks, [
+    { locator: "getByRole('button', { name: 'Log in' })", count: 1, element: 'button "Log in"', suggestions: [], error: null },
+    { locator: "getByRole('link')", count: 2, element: null, suggestions: ["getByRole('link', { name: 'Home' })", "getByRole('link', { name: 'Courses' })"], error: null },
+    { locator: "getByRole('button', { name: 'Gone' })", count: 0, element: null, suggestions: [], error: null },
+    { locator: 'page.evaluate(() => document.cookie)', count: null, element: null, suggestions: [], error: 'not a getBy… locator this job checks' },
+  ]);
 
   // One MCP server per role, started lazily; only the Admin one signs in.
   assert.equal(starts.length, 2);
@@ -101,6 +108,16 @@ test("shows the pages Qualio asks for, signed in by the job, and refuses everyth
   }
   // The password never travels to Qualio.
   assert.ok(!JSON.stringify(calls).includes('s3cret-pw'));
+});
+
+test('checkableLocator lets only getBy… locators through', () => {
+  assert.equal(checkableLocator("getByRole('link', { name: 'Next page' }).first()"), "getByRole('link', { name: 'Next page' }).first()");
+  for (const bad of ['page.evaluate(() => 1)', "getByRole('a').evaluate(() => 1)", "getByRole('a').click()", "getByRole('a', { name: `${x}` })", "locator('#id')", "getByRole('a')\n.fill('x')"]) assert.equal(checkableLocator(bad), null);
+});
+
+test('locatorCount reads what the snapshot target answered', () => {
+  assert.equal(locatorCount('x', { error: 'Error: "x" is not a valid target. Use a ref…' }).error, '"x" is not a valid target. Use a ref…');
+  assert.equal(locatorCount('x', { text: '```yaml\n- textbox "Email address" [ref=e10]\n```' }).element, 'textbox "Email address"');
 });
 
 test('hosts nothing when live diagnosis is off', async () => {
