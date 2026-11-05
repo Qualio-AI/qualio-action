@@ -229,67 +229,85 @@ async function setup(mapDir, branch, minutes, input = '') {
   let mapped = false;
   let checked = 0;
   let said = '';
-  for (;;) {
-    if (state.message && state.message !== said) console.log((said = state.message));
-    if (state.state === 'map') {
-      if (mapped) throw new Error('The map of the application did not reach Qualio. Check the mapper’s output above.');
-      mapped = true;
-      console.log('::group::Map the application');
-      await writeFiles(mapDir, state.files);
-      await install(mapDir);
-      const code = await run('npx', ['playwright', 'test', '-c', 'qualio-map.config.ts'], { cwd: mapDir });
-      console.log('::endgroup::');
-      if (code !== 0) console.log('::warning title=Qualio::Mapping the application reported a problem (see the "Map the application" group).');
-    } else if (state.state === 'validate') {
-      if (state.round <= checked) throw new Error(`The results of check ${checked} did not reach Qualio. Check the [qualio] lines in its output.`);
-      checked = state.round;
-      console.log(`::group::Check ${checked}: run the generated tests`);
-      // The suite's tests, written into the tests folder of this checkout (never committed by this job).
-      const folder = await testsFolder(branch, input);
-      const testsDir = folder.abs;
-      await mkdir(testsDir, { recursive: true });
-      const has = (await testFiles(testsDir)).map((f) => f.path);
-      const changes = await call('/v1/tests/changes', { branch, suiteId, has });
-      if (changes.status !== 200) throw new Error(`Getting the tests to check failed (${changes.status}): ${changes.body.error ?? 'unknown error'}`);
-      await applyFiles(testsDir, changes.body.files);
-      await writeManifest(`suite-${suiteId}-${checked}`, changes.body.revisionIds);
-      process.env.QUALIO_REPORTER = await installReporter(testsDir);
-      await install(testsDir);
-      // Failures are expected here: Qualio repairs those tests (or drops them) and the next check runs.
-      // No retries and a short test timeout: a retry tells Qualio nothing new and only costs the job's time.
-      await run('npx', ['playwright', 'test', '--retries=0', `--timeout=${CHECK_TEST_TIMEOUT_MS}`], { cwd: testsDir, env: { QUALIO_RUN_ROUND: String(checked) } });
-      console.log('::endgroup::');
-    } else if (state.state === 'done') {
-      const result = state.result ?? { tests: 0, features: 0, dropped: [] };
-      const counts = `${plural(result.tests, 'test')} across ${plural(result.features, 'feature')}`;
-      console.log(`The first test suite is ready: ${counts}, all passing. Qualio opens a pull request into ${branch} that adds them to the repository.`);
-      await summary([
-        '### 🎉 Qualio: first test suite ready',
-        '',
-        alert('TIP', `✅ ${counts}, all passing in this job (check ${state.round}). Qualio opens a pull request into \`${branch}\` that adds them: merge it, then this one.${state.url ? ` [Open it in Qualio](${state.url})` : ''}`),
-        ...(result.dropped.length
-          ? [
-              '',
-              details(
-                `⚠️ Left out (${result.dropped.length})`,
-                [
-                  '|  | Feature | Test | Reason |',
-                  '|---|---|---|---|',
-                  ...result.dropped.map((d) => `| ${d.bug ? '🐞' : '⏭️'} | ${cell(d.featureKey, 40)} | ${cell(d.test)} | ${cell(`${d.reason}${d.bug ? ': looks like an application bug' : ''}`, 300)} |`),
-                ].join('\n'),
-              ),
-            ]
-          : []),
-      ]);
-      return output({ state: 'completed' });
-    } else if (state.state === 'failed') {
-      throw new Error(`Setting up the first test suite failed: ${state.error ?? 'unknown error'}${state.url ? ` (${state.url})` : ''}`);
+  // mapping.explore: while Qualio explores what links can't reach, this job hosts the browser (writes blocked).
+  const live = liveDiagnosis(mapDir);
+  let host = null;
+  const stopHost = async () => {
+    if (!host) return;
+    const stopping = host;
+    host = null;
+    await stopping.stop();
+    if (stopping.stats.opened || stopping.stats.failed) console.log(`Exploring: Qualio clicked ${plural(stopping.stats.opened, 'control')} in this job's browser${stopping.stats.failed ? ` (${stopping.stats.failed} couldn't be clicked)` : ''}, with every write blocked.`);
+  };
+  try {
+    for (;;) {
+      if (state.message && state.message !== said) console.log((said = state.message));
+      if (live && state.browser && !host) {
+        console.log("Qualio is exploring what links can't reach (dialogs, tabs, menus) through this job's browser. Every request that could change data is blocked there.");
+        host = startBrowserHost(state.browser, { call, ...live, log: (line) => console.log(line.replace(/^Live diagnosis:/, 'Exploring:')) });
+      } else if (host && !state.browser) await stopHost();
+      if (state.state === 'map') {
+        if (mapped) throw new Error('The map of the application did not reach Qualio. Check the mapper’s output above.');
+        mapped = true;
+        console.log('::group::Map the application');
+        await writeFiles(mapDir, state.files);
+        await install(mapDir);
+        const code = await run('npx', ['playwright', 'test', '-c', 'qualio-map.config.ts'], { cwd: mapDir });
+        console.log('::endgroup::');
+        if (code !== 0) console.log('::warning title=Qualio::Mapping the application reported a problem (see the "Map the application" group).');
+      } else if (state.state === 'validate') {
+        if (state.round <= checked) throw new Error(`The results of check ${checked} did not reach Qualio. Check the [qualio] lines in its output.`);
+        checked = state.round;
+        console.log(`::group::Check ${checked}: run the generated tests`);
+        // The suite's tests, written into the tests folder of this checkout (never committed by this job).
+        const folder = await testsFolder(branch, input);
+        const testsDir = folder.abs;
+        await mkdir(testsDir, { recursive: true });
+        const has = (await testFiles(testsDir)).map((f) => f.path);
+        const changes = await call('/v1/tests/changes', { branch, suiteId, has });
+        if (changes.status !== 200) throw new Error(`Getting the tests to check failed (${changes.status}): ${changes.body.error ?? 'unknown error'}`);
+        await applyFiles(testsDir, changes.body.files);
+        await writeManifest(`suite-${suiteId}-${checked}`, changes.body.revisionIds);
+        process.env.QUALIO_REPORTER = await installReporter(testsDir);
+        await install(testsDir);
+        // Failures are expected here: Qualio repairs those tests (or drops them) and the next check runs.
+        // No retries and a short test timeout: a retry tells Qualio nothing new and only costs the job's time.
+        await run('npx', ['playwright', 'test', '--retries=0', `--timeout=${CHECK_TEST_TIMEOUT_MS}`], { cwd: testsDir, env: { QUALIO_RUN_ROUND: String(checked) } });
+        console.log('::endgroup::');
+      } else if (state.state === 'done') {
+        const result = state.result ?? { tests: 0, features: 0, dropped: [] };
+        const counts = `${plural(result.tests, 'test')} across ${plural(result.features, 'feature')}`;
+        console.log(`The first test suite is ready: ${counts}, all passing. Qualio opens a pull request into ${branch} that adds them to the repository.`);
+        await summary([
+          '### 🎉 Qualio: first test suite ready',
+          '',
+          alert('TIP', `✅ ${counts}, all passing in this job (check ${state.round}). Qualio opens a pull request into \`${branch}\` that adds them: merge it, then this one.${state.url ? ` [Open it in Qualio](${state.url})` : ''}`),
+          ...(result.dropped.length
+            ? [
+                '',
+                details(
+                  `⚠️ Left out (${result.dropped.length})`,
+                  [
+                    '|  | Feature | Test | Reason |',
+                    '|---|---|---|---|',
+                    ...result.dropped.map((d) => `| ${d.bug ? '🐞' : '⏭️'} | ${cell(d.featureKey, 40)} | ${cell(d.test)} | ${cell(`${d.reason}${d.bug ? ': looks like an application bug' : ''}`, 300)} |`),
+                  ].join('\n'),
+                ),
+              ]
+            : []),
+        ]);
+        return output({ state: 'completed' });
+      } else if (state.state === 'failed') {
+        throw new Error(`Setting up the first test suite failed: ${state.error ?? 'unknown error'}${state.url ? ` (${state.url})` : ''}`);
+      }
+      if (Date.now() >= deadline) throw new Error(`The first test suite was not ready after ${minutes} minutes. Re-run the workflow to continue where it stopped.`);
+      if (state.state === 'wait') await new Promise((r) => setTimeout(r, POLL_MS));
+      const status = await call(`/v1/setup/${suiteId}/status`, { ...(live && { browser: true }) });
+      if (status.status !== 200) throw new Error(`Reading the setup status failed (${status.status}): ${status.body.error ?? 'unknown error'}`);
+      state = status.body;
     }
-    if (Date.now() >= deadline) throw new Error(`The first test suite was not ready after ${minutes} minutes. Re-run the workflow to continue where it stopped.`);
-    if (state.state === 'wait') await new Promise((r) => setTimeout(r, POLL_MS));
-    const status = await call(`/v1/setup/${suiteId}/status`, {});
-    if (status.status !== 200) throw new Error(`Reading the setup status failed (${status.status}): ${status.body.error ?? 'unknown error'}`);
-    state = status.body;
+  } finally {
+    await stopHost();
   }
 }
 
@@ -418,12 +436,13 @@ async function wait(runFile, minutes) {
 }
 
 /**
- * Whether this job can host a browser on the app for Qualio's diagnosis: the action's live-diagnosis
- * input (on by default), the app's URL, and the tests folder (its Playwright's Chromium is used).
+ * Whether this job can host a browser on the app for Qualio (a heal's diagnosis, the setup's exploration):
+ * the action's live-diagnosis input (on by default), the app's URL, and a folder whose Playwright's
+ * Chromium the browser uses (the tests folder, or the setup's mapper folder).
  */
-function liveDiagnosis() {
+function liveDiagnosis(dir = process.env.QUALIO_TESTS_DIR) {
   const baseUrl = process.env.QUALIO_BASE_URL;
-  const testsDir = process.env.QUALIO_TESTS_DIR;
+  const testsDir = dir;
   if (process.env.QUALIO_LIVE_DIAGNOSIS === 'false' || !baseUrl || !testsDir) return null;
   try {
     if (!/^https?:$/.test(new URL(baseUrl).protocol)) return null;

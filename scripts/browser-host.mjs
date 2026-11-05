@@ -5,7 +5,9 @@
 // JSON-RPC over stdio is spoken here directly).
 //
 // Look only: the host calls Playwright MCP's browser_navigate and browser_snapshot, nothing else, and
-// only for paths on the app's own origin. `check` resolves locators with Playwright's own engine through
+// only for paths on the app's own origin (heals). Exploring (the setup's mapping.explore) also clicks one
+// control per call, in a separate browser whose every page blocks requests that could change data
+// (WRITE_GUARD). `check` resolves locators with Playwright's own engine through
 // the snapshot's `target` (Playwright MCP parses locator text; it never evaluates it) and answers how
 // many elements each finds. Sign-ins happen in code (an --init-page script reading the
 // role's E2E_<ROLE>_USERNAME / _PASSWORD from this job's env), so credentials never reach Qualio or a
@@ -29,7 +31,7 @@ const SIGNED_OUT = 'signed out';
 const SAFE_ENV = ['PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP', 'CI', 'DISPLAY', 'XDG_RUNTIME_DIR', 'XDG_CACHE_HOME', 'PLAYWRIGHT_BROWSERS_PATH', 'npm_config_cache', 'NPM_CONFIG_CACHE', 'SystemRoot', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'ComSpec', 'PATHEXT'];
 
 /** Signs in on every new tab of a role's browser, like Qualio's mapper: the first form with a password field. */
-const SIGN_IN = `// Written by the Qualio action (live diagnosis): signs in with this job's secrets, read from its env.
+export const SIGN_IN = `// Written by the Qualio action (live diagnosis): signs in with this job's secrets, read from its env.
 exports.default = async ({ page }) => {
   const { QUALIO_SIGNIN_URL: url, QUALIO_SIGNIN_USERNAME: username, QUALIO_SIGNIN_PASSWORD: password } = process.env;
   if (!url || !username || !password) return;
@@ -44,6 +46,95 @@ exports.default = async ({ page }) => {
     throw new Error('the sign-in form is still shown after signing in with this role\\'s secrets');
 };
 `;
+
+/**
+ * Installed in every page of an exploring browser (after its sign-in): blocks every request that could
+ * change data (non-GET fetch and XHR except GraphQL queries, beacons, POST form submits) and logs each
+ * one as "[qualio] blocked …" for the host to report. Exploring clicks controls, so this is what keeps
+ * it from saving, deleting or sending anything.
+ */
+export const WRITE_GUARD = `(() => {
+  if (window.__qualioGuard) return;
+  window.__qualioGuard = true;
+  const writes = (method) => !/^(get|head|options|dialog)$/i.test(method || 'get');
+  const graphqlRead = (body) => typeof body === 'string' && /"query"\\s*:/.test(body) && !/\\bmutation\\b/.test(body);
+  const blocked = (what) => console.warn('[qualio] blocked ' + what);
+  const fetch0 = window.fetch;
+  window.fetch = function (input, init) {
+    const method = (init && init.method) || (input && typeof input === 'object' && input.method) || 'GET';
+    if (writes(method) && !graphqlRead(init && init.body)) {
+      blocked(String(method).toUpperCase() + ' ' + (typeof input === 'string' ? input : input && input.url));
+      return Promise.reject(new TypeError('Blocked by Qualio: exploring never changes data'));
+    }
+    return fetch0.apply(this, arguments);
+  };
+  const open0 = XMLHttpRequest.prototype.open;
+  const send0 = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) { this.__qualio = [method, url]; return open0.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function (body) {
+    const target = this.__qualio || ['GET', ''];
+    if (writes(target[0]) && !graphqlRead(body)) { blocked(String(target[0]).toUpperCase() + ' ' + target[1]); throw new DOMException('Blocked by Qualio: exploring never changes data', 'NetworkError'); }
+    return send0.apply(this, arguments);
+  };
+  if (navigator.sendBeacon) navigator.sendBeacon = function (url) { blocked('beacon ' + url); return false; };
+  document.addEventListener('submit', function (event) {
+    const form = event.target;
+    const method = (event.submitter && event.submitter.getAttribute('formmethod')) || (form && form.method);
+    if (writes(method)) { event.preventDefault(); event.stopImmediatePropagation(); blocked('form ' + String(method).toUpperCase() + ' ' + (form && form.action)); }
+  }, true);
+  const submit0 = HTMLFormElement.prototype.submit;
+  HTMLFormElement.prototype.submit = function () { if (writes(this.method)) { blocked('form ' + String(this.method).toUpperCase() + ' ' + this.action); return; } return submit0.call(this); };
+})();`;
+
+/** An exploring browser's first page: signs in (like SIGN_IN) when the role has secrets, then installs the guard. */
+export const EXPLORE_INIT = `// Written by the Qualio action (mapping.explore): signs in with this job's secrets, then blocks every write.
+const fs = require('node:fs');
+const path = require('node:path');
+const guard = fs.readFileSync(path.join(__dirname, 'write-guard.js'), 'utf8');
+exports.default = async ({ page }) => {
+  const { QUALIO_SIGNIN_URL: url, QUALIO_SIGNIN_USERNAME: username, QUALIO_SIGNIN_PASSWORD: password } = process.env;
+  if (url && username && password) {
+    await page.goto(url, { waitUntil: 'load', timeout: 20000 });
+    const form = page.locator('form:has(input[type=password])').first();
+    if (await form.isVisible().catch(() => false)) {
+      await form.locator('input:not([type=hidden]):not([type=password]):not([type=checkbox]):not([type=radio])').first().fill(username);
+      await form.locator('input[type=password]').first().fill(password);
+      await Promise.all([page.waitForLoadState('load'), form.locator('button[type=submit], input[type=submit], button:not([type])').first().click()]);
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+      if (await page.locator('form:has(input[type=password])').first().isVisible().catch(() => false))
+        throw new Error('the sign-in form is still shown after signing in with this role\\'s secrets');
+    }
+  }
+  await page.context().addInitScript({ content: guard });
+  await page.evaluate(guard).catch(() => {});
+};
+`;
+
+/** Controls exploring may click: the ones that open, switch or navigate. */
+const CLICKABLE_ROLES = new Set(['button', 'link', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'treeitem', 'combobox']);
+const SIGN_OUT = /\b(sign|log)[\s-]?out\b|\blogout\b|\bsignout\b/i;
+
+/** Why exploring won't click this element (null: it may), from its snapshot line and link URL. */
+export function clickRefusal(element, href, { origin, excludes = [] }) {
+  const role = /^(\w+)/.exec(element ?? '')?.[1] ?? '';
+  if (!CLICKABLE_ROLES.has(role)) return `exploring only clicks buttons, links, tabs and menus, not a ${role || 'control of unknown kind'}`;
+  if (SIGN_OUT.test(element)) return 'exploring never signs out';
+  if (href) {
+    let url;
+    try {
+      url = new URL(href, origin);
+    } catch {
+      return 'the link has no URL the job can read';
+    }
+    if (url.origin !== origin) return "the link leaves the application's origin";
+    if (SIGN_OUT.test(url.pathname)) return 'exploring never signs out';
+    const excluded = excludes.find((e) => e && href.includes(e));
+    if (excluded) return `the link is excluded from mapping (${excluded})`;
+  }
+  return null;
+}
+
+const yamlOf = (text) => /```yaml\n([\s\S]*?)\n```/.exec(text)?.[1] ?? '';
 
 /** Locators per check, as Qualio sends them. */
 export const MAX_LOCATORS = 10;
@@ -173,7 +264,8 @@ function pageText(snapshot) {
 }
 
 /**
- * Starts the host for a heal's browser session ({ sessionId, roles: [{ role, usernameEnv, passwordEnv }] }).
+ * Starts the host for a browser session ({ sessionId, roles: [{ role, usernameEnv, passwordEnv }], excludes? }):
+ * a heal's (live diagnosis) or the first suite's setup (mapping.explore).
  * `call` posts to Qualio (qualio.mjs's). Returns { stop, done, stats }; it ends by itself when Qualio
  * says the heal is done.
  */
@@ -185,17 +277,18 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
   let stopped = false;
   let executable;
 
-  async function serverFor(role) {
-    const key = role ?? SIGNED_OUT;
-    if (!servers.has(key)) servers.set(key, launch(role));
+  // Looking (open, check) and exploring (clicks, writes blocked) use separate browsers per role.
+  async function serverFor(role, mode = 'look') {
+    const key = `${mode}:${role ?? SIGNED_OUT}`;
+    if (!servers.has(key)) servers.set(key, launch(role, mode));
     return servers.get(key);
   }
 
-  async function launch(role) {
+  async function launch(role, mode) {
     if (executable === undefined) executable = browserExecutable(testsDir);
     if (!executable) throw new Error("the tests folder's Playwright Chromium was not found, so this job can't show the app");
     const env = Object.fromEntries(SAFE_ENV.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]));
-    const dir = path.join(tempDir, (role ?? SIGNED_OUT).replace(/[^\w-]+/g, '_'));
+    const dir = path.join(tempDir, `${mode}-${(role ?? SIGNED_OUT).replace(/[^\w-]+/g, '_')}`);
     await mkdir(dir, { recursive: true });
     const args = ['--headless', '--isolated', '--block-service-workers', '--output-dir', dir, '--executable-path', executable, '--timeout-navigation', '20000'];
     if (role) {
@@ -203,22 +296,30 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
       const username = account && process.env[account.usernameEnv];
       const password = account && process.env[account.passwordEnv];
       if (!username || !password) throw new Error(`can't sign in as ${role}: ${account ? `${account.usernameEnv} or ${account.passwordEnv} is empty in this job` : 'no such role'}`);
+      Object.assign(env, { QUALIO_SIGNIN_URL: base.href, QUALIO_SIGNIN_USERNAME: username, QUALIO_SIGNIN_PASSWORD: password });
+    }
+    if (mode === 'explore') {
+      // Every page of an exploring browser blocks writes, signed in or not.
+      await writeFile(path.join(tempDir, 'write-guard.js'), WRITE_GUARD);
+      const init = path.join(tempDir, 'explore-init.cjs');
+      await writeFile(init, EXPLORE_INIT);
+      args.push('--init-page', init);
+    } else if (role) {
       const signIn = path.join(tempDir, 'sign-in.cjs');
       await writeFile(signIn, SIGN_IN);
       args.push('--init-page', signIn);
-      Object.assign(env, { QUALIO_SIGNIN_URL: base.href, QUALIO_SIGNIN_USERNAME: username, QUALIO_SIGNIN_PASSWORD: password });
     }
     return new McpServer(command, args, { env, cwd: dir }).start();
   }
 
   /** Opens a path as a role (the app's origin only); the server, ready for more on that page. */
-  async function load({ path: rawPath, role }) {
+  async function load({ path: rawPath, role }, mode = 'look') {
     const p = appPath(rawPath);
     if (!p) throw new Error('not a path of the application');
     if (role != null && !session.roles.some((r) => r.role === role)) throw new Error(`no "${role}" role`);
     const url = new URL(p, base);
     if (url.origin !== base.origin) throw new Error("not on the application's origin");
-    const server = await serverFor(role ?? null);
+    const server = await serverFor(role ?? null, mode);
     await server.tool('browser_navigate', { url: url.href });
     const snapshot = await server.tool('browser_snapshot', {});
     const landed = pageUrl(snapshot);
@@ -249,10 +350,41 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
     return JSON.stringify({ checks });
   }
 
+  /**
+   * Exploring (mapping.explore): loads a page fresh in a browser that blocks every write, clicks one control
+   * (a button, link, tab or menu, never sign-out or an excluded or external link) and answers what the
+   * page shows then, with the writes it blocked.
+   */
+  async function explore(args) {
+    const control = checkableLocator(args.control);
+    if (!control) throw new Error('not a getBy… locator this job clicks');
+    const { server } = await load(args, 'explore');
+    const target = await server.tool('browser_snapshot', { target: control }).then((text) => ({ text }), (error) => ({ error: error.full ?? error.message }));
+    const found = locatorCount(control, target);
+    if (found.count !== 1) throw new Error(found.count === 0 ? 'the control is not on the page' : found.count === null ? (found.error ?? 'the control could not be found') : `the locator matches ${found.count} elements`);
+    const href = /^\s*- \/url: (\S+)/m.exec(target.text)?.[1] ?? null;
+    const refusal = clickRefusal(found.element, href, { origin: base.origin, excludes: session.excludes ?? [] });
+    if (refusal) throw new Error(refusal);
+    await server.tool('browser_click', { element: found.element, target: control });
+    await server.tool('browser_wait_for', { time: 1 }).catch(() => {});
+    const after = await server.tool('browser_snapshot', {});
+    const landed = pageUrl(after);
+    if (landed && new URL(landed).origin !== base.origin) throw new Error(`the click left the application (to ${new URL(landed).origin})`);
+    const consoleText = await server.tool('browser_console_messages', { level: 'warning' }).catch(() => '');
+    const blocked = [...consoleText.matchAll(/\[qualio\] blocked (.+?)(?: @ \S*)?$/gm)].map((m) => m[1].trim()).slice(0, 10);
+    return JSON.stringify({
+      url: landed ?? new URL(appPath(args.path), base).href,
+      title: /^- Page Title: (.+)$/m.exec(after)?.[1]?.trim() ?? null,
+      element: found.element,
+      snapshot: yamlOf(after).slice(0, MAX_RESULT_CHARS),
+      blocked,
+    });
+  }
+
   async function answer(c) {
     try {
-      if (c.tool !== 'open' && c.tool !== 'check') throw new Error(`the tool "${c.tool}" is not allowed`);
-      const result = c.tool === 'open' ? await open(c.args ?? {}) : await check(c.args ?? {});
+      if (c.tool !== 'open' && c.tool !== 'check' && c.tool !== 'explore') throw new Error(`the tool "${c.tool}" is not allowed`);
+      const result = c.tool === 'open' ? await open(c.args ?? {}) : c.tool === 'check' ? await check(c.args ?? {}) : await explore(c.args ?? {});
       stats.opened += 1;
       return { result };
     } catch (error) {
@@ -284,7 +416,7 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
       const c = reply.body?.call;
       if (!c) continue;
       const result = await answer(c);
-      const what = c.tool === 'check' ? `checked ${plural(c.args?.locators?.length ?? 0, 'locator')} on` : 'showed';
+      const what = c.tool === 'check' ? `checked ${plural(c.args?.locators?.length ?? 0, 'locator')} on` : c.tool === 'explore' ? `clicked ${c.args?.control ?? '?'} on` : 'showed';
       log(`Live diagnosis: ${'result' in result ? what : "couldn't show"} ${c.args?.path ?? '?'} ${c.args?.role ? `as ${c.args.role}` : SIGNED_OUT}${'error' in result ? ` (${result.error})` : ''}.`);
       await call('/v1/browser/result', { sessionId: session.sessionId, callId: c.id, ...result }).catch(() => {});
     }

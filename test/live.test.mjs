@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { appPath, checkableLocator, locatorCount } from '../scripts/browser-host.mjs';
+import vm from 'node:vm';
+import { appPath, checkableLocator, clickRefusal, EXPLORE_INIT, locatorCount, SIGN_IN, startBrowserHost, WRITE_GUARD } from '../scripts/browser-host.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const children = [];
@@ -128,4 +129,99 @@ test('hosts nothing when live diagnosis is off', async () => {
   const calls = await (await fetch(`${url}/__calls`)).json();
   assert.ok(calls.filter((c) => c.route === '/v1/tests/heal/status').every((c) => !c.body.browser));
   assert.ok(!calls.some((c) => c.route === '/v1/browser/next'));
+});
+
+test('clickRefusal lets exploring click only what opens, switches or navigates within the app', () => {
+  const app = { origin: 'http://app.test:3000', excludes: ['/admin/danger'] };
+  assert.equal(clickRefusal('button "Enrol student"', null, app), null);
+  assert.equal(clickRefusal('tab "Grades"', null, app), null);
+  assert.equal(clickRefusal('link "Course"', '/classes/2', app), null);
+  assert.match(clickRefusal('textbox "Email"', null, app), /only clicks buttons, links, tabs and menus/);
+  assert.match(clickRefusal('button "Sign out"', null, app), /never signs out/);
+  assert.match(clickRefusal('link "Leave"', '/logout', app), /never signs out/);
+  assert.match(clickRefusal('link "Docs"', 'https://docs.example/', app), /leaves the application/);
+  assert.match(clickRefusal('link "Wipe"', '/admin/danger/wipe', app), /excluded from mapping \(\/admin\/danger\)/);
+});
+
+test('the write guard blocks writes and lets reads through', async () => {
+  // Run the guard in a tiny fake window, as a page would.
+  const warned = [];
+  const sent = [];
+  class XHR { open(method, url) { this.m = method; this.u = url; } send() { sent.push(`${this.m} ${this.u}`); } }
+  const listeners = [];
+  const window = { fetch: async (input, init) => (sent.push(`${init?.method ?? 'GET'} ${input}`), 'ok') };
+  const sandbox = { window, console: { warn: (m) => warned.push(m) }, XMLHttpRequest: XHR, navigator: {}, DOMException: class extends Error {}, HTMLFormElement: class { submit() {} }, document: { addEventListener: (...a) => listeners.push(a) } };
+  new Function(...Object.keys(sandbox), WRITE_GUARD)(...Object.values(sandbox));
+  assert.equal(await window.fetch('/api/classes'), 'ok');
+  await assert.rejects(window.fetch('/api/classes', { method: 'POST', body: '{}' }), /Blocked by Qualio/);
+  assert.equal(await window.fetch('/graphql', { method: 'POST', body: '{"query":"query { classes { id } }"}' }), 'ok');
+  await assert.rejects(window.fetch('/graphql', { method: 'POST', body: '{"query":"mutation { deleteClass(id: 1) }"}' }), /Blocked/);
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('DELETE', '/api/classes/1');
+  assert.throws(() => xhr.send(), /Blocked/);
+  // A POST form is stopped before the app sees it; a GET form (a search) goes through.
+  const [type, onSubmit, capture] = listeners[0];
+  assert.equal(type, 'submit');
+  assert.equal(capture, true);
+  let stopped = 0;
+  const event = (method) => ({ target: { method, action: '/x' }, preventDefault: () => stopped++, stopImmediatePropagation: () => {} });
+  onSubmit(event('post'));
+  onSubmit(event('get'));
+  assert.equal(stopped, 1);
+  assert.deepEqual(sent, ['GET /api/classes', 'POST /graphql']);
+  assert.equal(warned.length, 4);
+});
+
+test('explores: clicks in a guarded browser, reports what opened and what was blocked', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'qualio-explore-'));
+  const log = path.join(dir, 'mcp.log');
+  const queue = [
+    { id: 'x1', tool: 'explore', args: { path: '/classes/1', role: 'Admin', control: "getByRole('button', { name: 'Enrol student' })" } },
+    { id: 'x2', tool: 'explore', args: { path: '/classes/1/delete', role: 'Admin', control: "getByRole('button', { name: 'Delete course' })" } },
+    { id: 'x3', tool: 'explore', args: { path: '/', role: 'Admin', control: "getByRole('button', { name: 'Sign out' })" } },
+    { id: 'x4', tool: 'explore', args: { path: '/', role: null, control: "getByRole('link', { name: 'Help' })" } },
+    { id: 'x5', tool: 'explore', args: { path: '/', role: null, control: "getByRole('textbox', { name: 'Email' })" } },
+    { id: 'x6', tool: 'explore', args: { path: '/', role: null, control: "getByRole('button', { name: 'Gone' })" } },
+  ];
+  const answers = {};
+  const call = async (route, body) => {
+    if (route === '/v1/browser/next') {
+      const next = queue.shift();
+      return { status: 200, body: next ? { call: next } : { done: true } };
+    }
+    answers[body.callId] = body;
+    return { status: 200, body: { ok: true } };
+  };
+  const env = { QUALIO_MCP_COMMAND: process.env.QUALIO_MCP_COMMAND, QUALIO_BROWSER_EXECUTABLE: process.env.QUALIO_BROWSER_EXECUTABLE, E2E_ADMIN_USERNAME: process.env.E2E_ADMIN_USERNAME, E2E_ADMIN_PASSWORD: process.env.E2E_ADMIN_PASSWORD };
+  Object.assign(process.env, { QUALIO_MCP_COMMAND: JSON.stringify([process.execPath, path.join(root, 'test/fake-mcp.mjs'), log]), QUALIO_BROWSER_EXECUTABLE: process.execPath, E2E_ADMIN_USERNAME: 'admin@school.test', E2E_ADMIN_PASSWORD: 's3cret-pw' });
+  try {
+    const host = startBrowserHost(
+      { sessionId: 's1', roles: [{ role: 'Admin', usernameEnv: 'E2E_ADMIN_USERNAME', passwordEnv: 'E2E_ADMIN_PASSWORD' }], excludes: [] },
+      { call, baseUrl: 'http://app.test:3000', testsDir: dir, tempDir: dir, log: () => {} },
+    );
+    await host.done;
+  } finally {
+    for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  const enrol = JSON.parse(answers.x1.result);
+  assert.equal(enrol.element, 'button "Enrol student"');
+  assert.equal(enrol.url, 'http://app.test:3000/classes/1');
+  assert.match(enrol.snapshot, /- dialog "Enrol a student"/);
+  assert.deepEqual(enrol.blocked, []);
+  assert.deepEqual(JSON.parse(answers.x2.result).blocked, ['form POST http://app.test:3000/classes/1/delete']);
+  assert.match(answers.x3.error, /never signs out/);
+  assert.match(answers.x4.error, /leaves the application/);
+  assert.match(answers.x5.error, /only clicks buttons, links, tabs and menus/);
+  assert.match(answers.x6.error, /not on the page/);
+  // Exploring browsers are their own (per role), and every one installs the write guard.
+  const starts = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(starts.length, 2);
+  for (const s of starts) assert.match(s.args[s.args.indexOf('--init-page') + 1], /explore-init\.cjs$/);
+  assert.equal(starts.find((s) => s.signedInAs)?.signedInAs, 'admin@school.test');
+  assert.match(readFileSync(path.join(dir, 'explore-init.cjs'), 'utf8'), /addInitScript\(\{ content: guard \}\)/);
+  assert.equal(readFileSync(path.join(dir, 'write-guard.js'), 'utf8'), WRITE_GUARD);
+});
+
+test('the scripts the browser loads compile (the fake MCP server never runs them)', () => {
+  for (const [name, source] of Object.entries({ SIGN_IN, EXPLORE_INIT, WRITE_GUARD })) assert.doesNotThrow(() => new vm.Script(source, { filename: name }), name);
 });

@@ -43,7 +43,7 @@ inputs:
     description: How long to wait for Qualio to heal failed tests before giving up on the re-run.
     default: '10'
   live-diagnosis:
-    description: While Qualio diagnoses failed tests, let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on base-url's origin only, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
+    description: While Qualio diagnoses failed tests (and, with qualio.yml's mapping.explore, while it sets up the first suite), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on base-url's origin only, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
     default: 'true'
   node-version:
     description: The Node.js version to run the tests with.
@@ -185,6 +185,8 @@ runs:
         QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
         WAIT_MINUTES: ${{ inputs.setup-wait-minutes }}
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        # mapping.explore: the job hosts a browser while Qualio explores (off with live-diagnosis: false).
+        QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" setup "$RUNNER_TEMP/qualio-map" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WAIT_MINUTES" "$WORKING_DIRECTORY"
 
     # The tests folder (qualio.yml's tests.path): a snapshot goes to Qualio for its agents, and the changes
