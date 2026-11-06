@@ -12,9 +12,11 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 let child;
 after(() => child?.kill());
 
-test('suggests what fits the diff and opens the Qualio pull request for the rest', async () => {
+/** Starts the stub in a mode and runs the outbox step against it. */
+async function runOutbox(mode) {
+  child?.kill();
   const port = 5300 + Math.floor(Math.random() * 300);
-  child = spawn(process.execPath, [path.join(root, 'test/stub-qualio.mjs'), String(port), 'changes'], { stdio: 'ignore' });
+  child = spawn(process.execPath, [path.join(root, 'test/stub-qualio.mjs'), String(port), mode], { stdio: 'ignore' });
   const url = `http://127.0.0.1:${port}`;
   for (let i = 0; i < 50; i++) {
     try {
@@ -26,8 +28,13 @@ test('suggests what fits the diff and opens the Qualio pull request for the rest
   }
   const out = execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'outbox', '0'], {
     encoding: 'utf8',
-    env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_API_URL: url, GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'acme/app', QUALIO_POLL_MS: '10' },
+    env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_API_URL: url, GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'acme/app', GITHUB_SERVER_URL: 'https://github.test', QUALIO_POLL_MS: '10' },
   });
+  return { out, url };
+}
+
+test('suggests what fits the diff and opens the Qualio pull request for the rest', async () => {
+  const { out, url } = await runOutbox('changes');
   const json = async (route) => (await fetch(`${url}${route}`)).json();
   const [github, outbox, calls] = await Promise.all([json('/__github'), json('/__outbox'), json('/__calls')]);
   assert.equal(calls.find((c) => c.route === '/v1/pr/outbox').body.changes, true);
@@ -65,4 +72,32 @@ test('suggests what fits the diff and opens the Qualio pull request for the rest
   );
   assert.deepEqual(ack.changes.qualioPr, { number: 8, url: 'https://github.test/acme/app/pull/8', headBranch: 'qualio/pr-7', headSha: 'commit2', state: 'open' });
   assert.match(out, /Qualio pull request #8 \(qualio\/pr-7 → feature\/sch-9\): 2 changes/);
+});
+
+test("tells Qualio when GitHub won't let the job open the Qualio pull request, with where to allow it", async () => {
+  const { out, url } = await runOutbox('changes-refused');
+  const json = async (route) => (await fetch(`${url}${route}`)).json();
+  const [github, outbox] = await Promise.all([json('/__github'), json('/__outbox')]);
+  // The branch is pushed (a person can open the pull request from it); the pull request is refused.
+  assert.deepEqual(github.refs, [{ ref: 'refs/heads/qualio/pr-7', sha: 'commit2' }]);
+  assert.deepEqual(github.pulls, []);
+  const ack = outbox.find((i) => i.id === 'c1').ack;
+  assert.deepEqual(
+    ack.changes.delivered.map((d) => [d.id, d.via]),
+    [
+      ['fix-in-diff', 'suggestion'],
+      ['fix-outside', 'report'],
+      ['new-tests', 'report'],
+    ],
+  );
+  assert.equal(ack.changes.qualioPr, null);
+  assert.deepEqual(ack.changes.blocked, {
+    reason: 'pull_request',
+    status: 403,
+    message: 'GitHub Actions is not permitted to create or approve pull requests.',
+    qualioBranch: 'qualio/pr-7',
+    compareUrl: 'https://github.test/acme/app/compare/feature%2Fsch-9...qualio%2Fpr-7?expand=1',
+  });
+  assert.match(out, /::warning title=Qualio::Qualio pushed its changes to qualio\/pr-7 but GitHub didn't let it open the pull request/);
+  assert.match(out, new RegExp(`${url.replace(/[.]/g, '\\.')}/docs/getting-started#allow-pull-requests`));
 });

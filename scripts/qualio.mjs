@@ -33,6 +33,8 @@ import { startBrowserHost } from './browser-host.mjs';
 import { commentableLines, suggestionBlock, suggestionComments } from './diff.mjs';
 
 const apiUrl = (process.env.QUALIO_API_URL ?? '').replace(/\/+$/, '');
+/** Qualio's guide to letting the action open Qualio's pull requests (shown when GitHub refuses one). */
+const ALLOW_PULL_REQUESTS_DOCS = `${apiUrl}/docs/getting-started#allow-pull-requests`;
 const apiKey = process.env.QUALIO_API_KEY ?? '';
 const POLL_MS = Number(process.env.QUALIO_POLL_MS || 10_000);
 /** Per test in the setup's checks (generated tests use short action and expect timeouts too). */
@@ -696,9 +698,14 @@ async function qualioPullRequest(repo, p, changes) {
     const server = process.env.GITHUB_SERVER_URL || 'https://github.com';
     const compare = `${server}/${process.env.GITHUB_REPOSITORY}/compare/${encodeURIComponent(p.branch)}...${encodeURIComponent(p.qualioBranch)}?expand=1`;
     console.log(
-      `::warning title=Qualio::Qualio pushed its changes to ${p.qualioBranch} but could not open the pull request (GitHub ${pr.status}: ${pr.message}). Open it yourself: ${compare}. To let Qualio open it, allow it in Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests".`,
+      `::warning title=Qualio::Qualio pushed its changes to ${p.qualioBranch} but GitHub didn't let it open the pull request (GitHub ${pr.status}: ${pr.message}). Open it yourself: ${compare}. To let Qualio open it, allow it in Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" (the organization's settings first, if the box is greyed out): ${ALLOW_PULL_REQUESTS_DOCS}. The next Qualio job tries again.`,
     );
-    return { ...result, delivered: result.delivered.map((d) => ({ ...d, via: 'report' })), qualioPr: null };
+    return {
+      ...result,
+      delivered: result.delivered.map((d) => ({ ...d, via: 'report' })),
+      qualioPr: null,
+      blocked: { reason: 'pull_request', status: pr.status ?? null, message: String(pr.message ?? '').slice(0, 300), qualioBranch: p.qualioBranch, compareUrl: compare },
+    };
   }
   return { ...result, qualioPr: { number: pr.data.number, url: pr.data.html_url, headBranch: p.qualioBranch, headSha: parent, state: 'open' } };
 }
@@ -745,16 +752,16 @@ async function deliverTestChanges(repo, item) {
   if (built.failed) {
     if (built.failed.status === 403 || built.failed.status === 404) {
       console.log(
-        "::warning title=Qualio::This job's GITHUB_TOKEN can't push Qualio's branch (qualio/*), so Qualio's changes to the tests are shown in its report instead. Add to the workflow: permissions: { contents: write }.",
+        `::warning title=Qualio::This job's GITHUB_TOKEN can't push Qualio's branch (qualio/*), so Qualio's changes to the tests are shown in its report instead. Add to the workflow: permissions: { contents: write } (${ALLOW_PULL_REQUESTS_DOCS}). The next Qualio job tries again.`,
       );
       for (const c of rest) if (c.via === null) delivered.push({ id: c.id, via: 'report' });
-      return { changes: { delivered } };
+      return { changes: { delivered, blocked: { reason: 'push', status: built.failed.status, message: String(built.failed.message ?? '').slice(0, 300), qualioBranch: p.qualioBranch, compareUrl: null } } };
     }
     return { failed: built.failed };
   }
   if (built.empty && p.qualioPr) return { ...(await retireQualioPullRequest(repo, p)), changes: { delivered: [...delivered, ...built.delivered], conflicts: built.conflicts, retired: p.qualioPr.number } };
   if (built.qualioPr) console.log(`Qualio pull request #${built.qualioPr.number} (${p.qualioBranch} → ${p.branch}): ${plural(built.delivered.length, 'change')}.`);
-  return { changes: { delivered: [...delivered, ...built.delivered], conflicts: built.conflicts, qualioPr: built.qualioPr ?? null } };
+  return { changes: { delivered: [...delivered, ...built.delivered], conflicts: built.conflicts, qualioPr: built.qualioPr ?? null, ...(built.blocked && { blocked: built.blocked }) } };
 }
 
 /** Sends one outbox item. Returns the GitHub call that failed, if one did, and the report comment's id. */

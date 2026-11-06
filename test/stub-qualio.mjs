@@ -31,7 +31,7 @@ const REPORT = '<!-- qualio:report -->\n\n### ✅ Qualio: Ready to merge';
 const outbox =
   reportLost
     ? [{ id: 'r1', kind: 'REPORT', prNumber: 7, sha: null, payload: { prNumber: 7, body: REPORT, commentId: 404 } }]
-    : mode === 'changes'
+    : mode === 'changes' || mode === 'changes-refused'
     ? [{ id: 'c1', kind: 'TEST_CHANGES', prNumber: 7, sha: null, payload: null }]
     : process.argv[3] === 'outbox'
     ? [
@@ -166,7 +166,7 @@ http
     calls.push({ route: req.url, method: req.method, auth: req.headers.authorization === 'Bearer qk_stub', body });
     res.setHeader('content-type', 'application/json');
     // GitHub's REST API, as the outbox uses it (any token).
-    if (req.url.startsWith('/repos/acme/app/') && mode === 'changes') {
+    if (req.url.startsWith('/repos/acme/app/') && (mode === 'changes' || mode === 'changes-refused')) {
       const route = req.url.slice('/repos/acme/app'.length);
       if (req.method === 'GET' && route === '/pulls/7') return res.end(JSON.stringify({ number: 7, state: 'open', head: { sha: 'head7' } }));
       if (req.method === 'GET' && route.startsWith('/pulls/7/files'))
@@ -198,6 +198,9 @@ http
         return res.writeHead(201).end(JSON.stringify({ ref: body.ref }));
       }
       if (req.method === 'GET' && route.startsWith('/pulls?')) return res.end('[]');
+      // changes-refused: the repository doesn't allow GitHub Actions to create pull requests.
+      if (req.method === 'POST' && route === '/pulls' && mode === 'changes-refused')
+        return res.writeHead(403).end(JSON.stringify({ message: 'GitHub Actions is not permitted to create or approve pull requests.' }));
       if (req.method === 'POST' && route === '/pulls') {
         github.pulls.push(body);
         return res.writeHead(201).end(JSON.stringify({ number: 8, html_url: 'https://github.test/acme/app/pull/8' }));
