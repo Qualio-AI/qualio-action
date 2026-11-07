@@ -88,19 +88,18 @@ jobs:
           test "$HEAL" = patched
           test "$RUN_URL" = http://stub.test/runs/run_2
           grep -q "name: 'Log in'" test/heal-fixture/tests/login.spec.ts
-          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r.startsWith('/v1/tests/') || r === '/v1/setup/start').join(' ')")
-          test "$routes" = "/v1/setup/start /v1/tests/prepare /v1/tests/snapshot /v1/tests/snapshot /v1/tests/heal/status /v1/tests/heal/status /v1/tests/changes"
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r.startsWith('/v1/tests/') || r === '/v1/map/start').join(' ')")
+          test "$routes" = "/v1/map/start /v1/tests/prepare /v1/tests/snapshot /v1/tests/snapshot /v1/tests/heal/status /v1/tests/heal/status /v1/tests/changes"
 
-  # A project without a first test suite: the job maps the app with Qualio's mapper, then checks the
-  # generated suite until it passes (the stub's first check fails, the "repaired" second passes),
-  # and doesn't run the tests again afterwards.
-  setup:
+  # A project with no map yet: the job maps the app with Qualio's mapper first (no tests are generated),
+  # then runs the repository's tests as usual.
+  map:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Start the stub Qualio API (no first suite yet)
+      - name: Start the stub Qualio API (no map yet)
         run: |
-          node test/stub-qualio.mjs 4555 setup &
+          node test/stub-qualio.mjs 4555 map &
           for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
       - id: action
         uses: ./
@@ -109,15 +108,42 @@ jobs:
         with:
           api-key: qk_stub
           api-url: http://localhost:4555
-      - name: The suite was set up in the same job
+          heal-wait-minutes: '1'
+      - name: The app was mapped, then the tests ran
         env:
           OUTCOME: ${{ steps.action.outcome }}
-          SETUP: ${{ steps.action.outputs.setup-state }}
+          MAP: ${{ steps.action.outputs.map-state }}
+          HEAL: ${{ steps.action.outputs.heal-status }}
         run: |
           test "$OUTCOME" = success
-          test "$SETUP" = completed
-          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r !== '/v1/setup/s1/status' && !r.startsWith('/v1/pr/')).join(' ')")
-          test "$routes" = "/v1/setup/start /v1/setup/s1/mapped /v1/tests/prepare /v1/tests/changes /v1/runs /v1/tests/prepare /v1/tests/changes /v1/runs"
+          test "$MAP" = mapped
+          test "$HEAL" = patched
+          routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r.startsWith('/v1/map/') || r === '/v1/tests/prepare').join(' ')")
+          test "$routes" = "/v1/map/start /v1/map/c1/mapped /v1/map/c1/status /v1/tests/prepare"
+
+  # No tests yet (tests.path names a folder that doesn't exist, and Qualio has nothing to write): the
+  # job passes with a notice and runs nothing.
+  empty:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API (no tests yet)
+        run: |
+          node test/stub-qualio.mjs 4555 empty &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: action
+        uses: ./
+        with:
+          api-key: qk_stub
+          api-url: http://localhost:4555
+      - name: Nothing ran, and the job passed
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          VERSION: ${{ steps.action.outputs.playwright-version }}
+        run: |
+          test "$OUTCOME" = success
+          test -z "$VERSION"
+          test ! -e e2e-none-yet
 
   # The comment job (command: comment) never installs or runs tests, nor tells Qualio a pull request
   # closed; outside an issue_comment event it relays nothing.

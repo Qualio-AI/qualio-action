@@ -73,6 +73,9 @@ test('sends the tests folder and writes the changes Qualio offers on top', async
   assert.equal(snapshots[0].body.headSha, 'abc1234');
   // The stub's snapshot answer has no changes; the changes route has the fix (healed).
   assert.match(await readFile(outputs, 'utf8'), /run=true\ndir=.*test\/heal-fixture/);
+  // The team's own config doesn't list Qualio's reporter: the run adds it (with list and HTML).
+  assert.match(await readFile(outputs, 'utf8'), new RegExp(`reporter-args=--reporter=list,html,${tests.replace(/[/\\.]/g, '\\$&')}/\\.qualio/qualio-reporter\\.ts`));
+  assert.match(log, /doesn't list Qualio's reporter/);
   assert.match(await readFile(path.join(tests, '.qualio/qualio-reporter.ts'), 'utf8'), /class QualioReporter/);
   assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')), { bundleId: 'repo', revisionIds: [] });
   assert.doesNotMatch(log, /Applied/);
@@ -92,11 +95,34 @@ test('a project whose tests Qualio still keeps runs them from Qualio while the m
   assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')), { bundleId: 'move', revisionIds: ['m1'] });
 });
 
-test('a missing tests folder fails with the path', async () => {
-  const url = await stub('');
+test('no tests yet: the job has nothing to run, with a notice instead of a failure', async () => {
+  const url = await stub('empty');
+  const ws = await workspace();
+  const { log, outputs } = run(url, ws, ['prepare', 'main']);
+  assert.match(log, /::notice title=Qualio::There are no tests in 'e2e-none-yet' yet/);
+  assert.match(await readFile(outputs, 'utf8'), /run=false/);
+});
+
+test('without Qualio (no api-key), a missing tests folder fails with the path', async () => {
   const ws = await workspace();
   assert.throws(
-    () => run(url, ws, ['prepare', 'main']),
-    (error) => /::error title=Qualio::The tests folder 'test\/heal-fixture' does not exist/.test(error.stdout),
+    () =>
+      execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'prepare', 'main', 'does-not-exist'], {
+        encoding: 'utf8',
+        env: { ...process.env, QUALIO_API_URL: '', QUALIO_API_KEY: '', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt') },
+      }),
+    (error) => /The tests folder 'does-not-exist' does not exist/.test(error.stdout),
   );
+});
+
+test('maps nothing when Qualio has a map, or is older than the map step', async () => {
+  const url = await stub('');
+  const ws = await workspace();
+  const { outputs } = run(url, ws, ['map', path.join(ws, 'map'), 'main', '1']);
+  assert.match(await readFile(outputs, 'utf8'), /state=skipped/);
+  const calls = await (await fetch(`${url}/__calls`)).json();
+  assert.deepEqual(calls.filter((c) => c.route.startsWith('/v1/map/')).map((c) => [c.route, c.body.branch]), [['/v1/map/start', 'main']]);
+  // `setup` is the map step's name in workflows written before phase 54.
+  const legacy = run(url, ws, ['setup', path.join(ws, 'map'), 'main', '1']);
+  assert.match(await readFile(legacy.outputs, 'utf8'), /state=skipped/);
 });

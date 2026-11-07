@@ -73,15 +73,15 @@ Under **Project settings → Test accounts**, add one account per role with its 
 
 (Upper case, with spaces and dashes turned into `_`. Projects without roles use `E2E_USERNAME` / `E2E_PASSWORD`.)
 
-### Step 3: The setup pull request maps the app and sets up the first test suite
+### Step 3: The setup pull request maps the app and runs your tests
 
-The wizard's **Open setup pull request** (after Step 4's GitHub connection) commits `.github/workflows/qualio.yml` to `qualio-bot/setup`. Edit its **Start the application** step so your app runs in the job, add the secrets (Step 5), and push. The workflow's **first run**:
+The wizard's **Create in GitHub** opens GitHub's editor with `.github/workflows/qualio.yml` filled in, on a branch named `qualio-bot/setup`. Edit its **Start the application** step so your app runs in the job, add the secrets (Step 5), and push. Qualio generates nothing: it works on top of the tests you have. The workflow's **first run**:
 
 1. maps the application in the job with the mapper Qualio sends (signed out, then as each role; it follows links but never submits forms), and uploads each page's accessibility tree, form fields, verified locators and a screenshot to Qualio's **Knowledge base**;
-2. waits while Qualio plans the features, writes their specs (approved automatically) and writes the Playwright tests;
-3. runs those tests in the job. Tests that fail are repaired by Qualio and run again (up to 4 checks); tests that still fail are left out and listed, and a failure that looks like an application bug (server errors, error pages, missing controls) is never "repaired" into passing: it is left out and reported as a possible bug.
+2. runs your Playwright tests from the folder `tests.path` names, as they are, with your own `playwright.config` (the action adds Qualio's reporter to the run when the config doesn't list it);
+3. sends Qualio the tests folder, and Qualio reads the tests to learn which features they cover. They appear under **Features**; from then on Qualio heals them, explains their failures and adds tests for your tickets on top. Nothing changes in your repository.
 
-The job passes once every delivered test has passed. Qualio then opens a pull request into the setup branch that adds them to the tests folder (`qualio/qualio-bot/setup`): merge it, then the setup pull request. This first run takes longer than later ones; the workflow allows 120 minutes.
+No tests yet? The job passes and runs nothing; the first approved ticket's tests start the folder. The map is made once; **Map again** on Qualio's Map page maps the app on the next job on the target branch.
 
 ### Step 4: Connect the GitHub repository
 
@@ -143,7 +143,7 @@ The runner always needs outbound HTTPS to Qualio (`QUALIO_API_URL`) to report re
 
 ### Step 7: Create your first feature
 
-After the first test suite (Step 3), create features yourself:
+After the first run (Step 3), create features yourself:
 
 1. **Features → New feature**: describe what users should be able to do. Features also arrive as **Tickets**, pasted, from Jira (**Project settings → Jira → Connect with Jira**) or from `POST /v1/tickets`.
 2. Answer the **Analyst's** clarifying questions in the feature chat.
@@ -242,7 +242,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `config` | `''` | How Qualio works on this project, as YAML (`version: 1`): `overview` (documents in the repository), `specs.approval`, `self-healing` (`sensitivity`, `sure-from`, `rules`), `mapping` (`max-pages`, `start-paths`, `exclude`), `roles`, `github` (`target-branch`, `report`) and `jira` (`projects`, `board`, `columns`). Sent to Qualio (`POST /v1/config/sync`) in every job with a checkout; the settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. An invalid config fails the job. See [Configuration](#configuration). |
 | `config-file` | `''` | A YAML file in the repository with the same config (e.g. `.qualio/config.yml`), instead of `config`. Needs `actions/checkout`. |
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
-| `setup-wait-minutes` | `25` | The first run (no test suite yet) maps the app and checks the generated tests in the job. How long that may take before the job gives up; a re-run continues where it stopped. Keep it a few minutes under the job's `timeout-minutes`. |
+| `setup-wait-minutes` | `25` | How long mapping the application may take when Qualio asks a job to map it (the first job, or after **Map again**), exploration (`mapping.explore`) included. The tests run after it either way. |
 | `heal-wait-minutes` | `10` | How long to wait for Qualio's heal of a failed run before giving up on the re-run. |
 | `live-diagnosis` | `true` | While Qualio diagnoses failed tests, let it look at the running app from this job (see *Live diagnosis* below). `false` turns it off. |
 | `look-minutes` | `10` | At the end of a job, how long it may keep the running app open for a test chat in Qualio that asked to look at it (see *Live diagnosis* below). `0` turns it off. |
@@ -260,7 +260,8 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `playwright-version` | The `@playwright/test` version installed in the tests folder. |
 | `qualio-run-url` | The run's page in Qualio (the re-run's, after a heal). Empty when the results were not reported. |
 | `config-scope` | Where this job's config applied: `project`, `branch` or `none`. Empty without `config`/`config-file`. |
-| `setup-state` | `ready` (the project already had its first suite) or `completed` (this job set it up). Empty when the setup didn't run (no `api-key`). |
+| `map-state` | `mapped` (this job mapped the app), `skipped` (Qualio didn't ask) or `failed` (mapping failed; the job goes on). Empty without an `api-key`. |
+| `setup-state` | Deprecated (the first-suite setup is gone): always empty. |
 | `heal-status` | How healing a failed run ended: `patched`, `proposed` (the project asks first: someone decides in Qualio), `declined`, `not_healable`, `stopped`, `failed`, `timeout` or `none`. Empty when the tests passed or weren't run. |
 
 ### Configuration
@@ -298,7 +299,7 @@ The step **Sync the Qualio config** sends the YAML, then the overview documents 
 2. On every pull request event, tells Qualio what the pull request is (`POST /v1/pr/sync`: number, title, description, branch, head commit, merged, who opened it, and the names of test account secrets that were empty). This is how Qualio follows pull requests; it never reads the repository.
 3. With `config` or `config-file`, sends Qualio the config and the overview documents it names (see [Configuration](#configuration)).
 4. Sends what Qualio queued for GitHub (see below), at the start and the end of the job.
-5. Asks Qualio whether the project has a first test suite (`POST /v1/setup/start`). If not, sets it up in this job: runs the mapper Qualio sends, waits for the suite (`/v1/setup/:id/status`), and writes each check of it into the tests folder of the checkout (`/v1/tests/changes` with `suiteId`) and runs it (`QUALIO_RUN_ROUND` = the check; no retries and a 20-second test timeout, so a wrong locator fails fast) until it is ready; the job then ends (`setup-state` output `completed`). Up to `setup-wait-minutes` (default 25).
+5. **Maps the application** when Qualio asks (`POST /v1/map/start`: the project's first job, or after **Map again**): runs the mapper Qualio sends, then polls `/v1/map/:crawlId/status`, hosting a write-guarded browser while Qualio explores (`mapping.explore`). Never fails the job; up to `setup-wait-minutes` (default 25). Output `map-state`.
 6. **Prepares the tests** (`POST /v1/tests/prepare`, `/v1/tests/snapshot`): finds the tests folder (`tests.path`), sends Qualio a snapshot of it (hashes, then the contents Qualio doesn't have; never `node_modules` or Playwright's output), and writes the changes Qualio offers on this branch on top of the checkout (new tests and verified fixes: they run here before they're committed, and while they wait to be). Nothing is committed. A project whose tests Qualio still kept gets the whole folder until its move pull request is merged.
 7. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise) and Chromium, caching the browser per Playwright version.
 8. Runs `npx playwright test` with `QUALIO_API_URL`, `QUALIO_API_KEY`, `QUALIO_BASE_URL`, `QUALIO_COMMIT_SHA`, `QUALIO_RUN_MANIFEST` (the changes it applied) and `QUALIO_REPORTER` (Qualio's reporter, which this action brings: the generated `playwright.config.ts` adds it).
@@ -408,11 +409,11 @@ To withdraw a bad release, move `v1` back to the previous good tag (`git tag -f 
 ## Development
 
 - `action.yml`: the composite action. Steps use `shell: bash` and never echo secrets.
-- `scripts/qualio.mjs`: the Qualio API calls: `setup` (the first test suite: map, wait, check until ready), `prepare` (the tests folder: snapshot, Qualio's changes on top), `apply` (the fix, after a heal), `wait`, `sync`, `config`, `outbox` (the report, suggestions and Qualio's pull request with the Git data API), `comment`, `errored`. Node 20, no dependencies.
+- `scripts/qualio.mjs`: the Qualio API calls: `map` (maps the app when Qualio asks; `setup` is its old name), `prepare` (the tests folder: snapshot, Qualio's changes on top), `apply` (the fix, after a heal), `wait`, `sync`, `config`, `outbox` (the report, suggestions and Qualio's pull request with the Git data API), `comment`, `errored`. Node 20, no dependencies.
 - `scripts/diff.mjs`: line diffs, the lines a pull request's diff shows, and the suggestion comments for a fix.
 - `runtime/qualio-reporter.ts`: Qualio's Playwright reporter, a copy of `qualio-webapp/packages/reporter` (`pnpm reporter:sync` there).
 - `test/fixture`: a stand-in for a tests folder (`@playwright/test` pinned to the same version as qualio-webapp). `test/heal-fixture`: one whose test fails until Qualio's fix is written on top.
-- `test/stub-qualio.mjs`: a stub of Qualio's CI API and of GitHub's REST API (modes: `propose`, `setup`, `outbox`, `report-lost`, `changes`, `move`, `healed`).
+- `test/stub-qualio.mjs`: a stub of Qualio's CI API and of GitHub's REST API (modes: `propose`, `map`, `empty`, `outbox`, `report-lost`, `changes`, `move`, `healed`).
 - `test/*.test.mjs` (`node --test test/*.test.mjs`): diffs and suggestions, prepare and apply, the outbox (report, suggestions and the Qualio pull request), config.
 - `.github/workflows/test.yml`: the node tests, actionlint, the action on the fixture (`uses: ./`), the missing-folder failure path, the heal against the stub (fail, heal, re-run with the fix, pass) and the first-suite setup (map, a failing check, a passing check).
 - `.github/workflows/release.yml`: moves the major tag on each published release.

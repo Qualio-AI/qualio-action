@@ -6,10 +6,11 @@
 // It also answers the pull request sync and the GitHub outbox (empty unless "outbox" or "changes"), and
 // stands in for the GitHub REST calls the outbox makes (/repos/...), for local runs with GITHUB_API_URL set to it.
 //
-//   node test/stub-qualio.mjs [port] [propose|setup|outbox|report-lost|changes|move]
+//   node test/stub-qualio.mjs [port] [propose|map|empty|outbox|report-lost|changes|move]
 //     (default 4555; "propose": the project asks first, so the heal ends "proposed" and nothing is
-//     fixed; "setup": the project has no first test suite yet, so the job maps the app with the stub's
-//     mapper, and checks the suite twice: the first check fails, the "repaired" second one passes;
+//     fixed; "map": the project has no map yet, so the job maps the app with the stub's mapper first,
+//     then runs the tests as usual; "empty": the tests folder doesn't exist yet and Qualio has nothing
+//     to write, so the job has nothing to run;
 //     "changes": Qualio offers three changes on pull request #7 (one fits a suggestion, one is outside
 //     the diff, one adds a file); "move": the project's tests are still in Qualio, so a job without the
 //     tests folder gets the whole folder; "live": the heal looks at the running app through the job's
@@ -20,7 +21,7 @@ import http from 'node:http';
 
 const port = Number(process.argv[2] || 4555);
 const propose = process.argv[3] === 'propose';
-const setupMode = process.argv[3] === 'setup';
+const mapMode = process.argv[3] === 'map';
 const mode = process.argv[3] ?? '';
 const healedNow = mode === 'healed';
 // "outbox": a comment, a status, a dispatch, a label change, the pull request's report (posted, as no
@@ -59,8 +60,8 @@ const browserQueue = [
 ];
 const browserAnswers = [];
 let healed = false;
-// Setup mode: map → wait → check 1 (fails) → wait → check 2 (passes) → done.
-const setup = { mapped: false, round: 0, reported: 0, passed: false, polls: 0 };
+// Map mode: map → done.
+let mapped = false;
 
 const spec = (name) => `import { expect, test } from '@playwright/test';
 
@@ -109,7 +110,7 @@ const mapper = () => [
 
 test('map the application for Qualio', async ({ page }) => {
   await page.setContent('<main><h1>Home</h1></main>');
-  const res = await fetch(process.env.QUALIO_API_URL + '/v1/setup/s1/mapped', {
+  const res = await fetch(process.env.QUALIO_API_URL + '/v1/map/c1/mapped', {
     method: 'POST',
     headers: { authorization: 'Bearer ' + process.env.QUALIO_API_KEY, 'content-type': 'application/json' },
     body: JSON.stringify({ crawlId: 'c1', pages: [{ role: null, url: 'http://app.test/', pattern: '/', title: 'Home', headings: ['Home'], landmarks: ['main'], controls: [] }], signedIn: [] }),
@@ -119,40 +120,6 @@ test('map the application for Qualio', async ({ page }) => {
 `,
   },
 ];
-
-// The suite's checks report their round like Qualio's reporter (QUALIO_RUN_ROUND).
-const setupReporter = `export default class SetupReporter {
-  async onEnd(result) {
-    await fetch(process.env.QUALIO_API_URL + '/v1/runs', {
-      method: 'POST',
-      headers: { authorization: 'Bearer ' + process.env.QUALIO_API_KEY, 'content-type': 'application/json' },
-      body: JSON.stringify({ round: Number(process.env.QUALIO_RUN_ROUND), status: result.status }),
-    });
-  }
-}
-`;
-
-const suiteBundle = () => ({
-  revisionIds: ['r1'],
-  replace: false,
-  files: [
-    pkg,
-    { path: 'playwright.config.ts', content: "import { defineConfig } from '@playwright/test';\nexport default defineConfig({ testDir: './tests', reporter: [['list'], ['./support/setup-reporter.mjs']] });\n" },
-    { path: 'support/setup-reporter.mjs', content: setupReporter },
-    { path: 'tests/login.spec.ts', content: spec(setup.round >= 2 ? 'Log in' : 'Sign in') },
-  ],
-});
-
-function setupStatus() {
-  if (!setup.mapped) return { state: 'map', suiteId: 's1', round: 0, files: mapper() };
-  if (setup.passed) return { state: 'done', round: setup.round, result: { features: 1, tests: 1, dropped: [] }, url: 'http://stub.test/setup' };
-  // A check whose results arrived: "repair", then the next check.
-  if (setup.reported === setup.round && setup.polls++ >= 1) {
-    setup.round += 1;
-    setup.polls = 0;
-  }
-  return setup.reported < setup.round ? { state: 'validate', round: setup.round, message: `Running the generated tests (check ${setup.round}).` } : { state: 'wait', round: setup.round, message: 'Writing the tests.' };
-}
 
 http
   .createServer(async (req, res) => {
@@ -215,20 +182,15 @@ http
       return res.writeHead(req.url.endsWith('/dispatches') ? 204 : 201).end(req.url.endsWith('/dispatches') ? '' : JSON.stringify({ id: 1 }));
     }
     if (req.headers.authorization !== 'Bearer qk_stub') return res.writeHead(401).end(JSON.stringify({ error: 'Invalid or revoked API key' }));
-    if (req.url === '/v1/setup/start') return res.end(JSON.stringify(setupMode ? setupStatus() : { state: 'done', suiteId: 's0' }));
-    if (req.url === '/v1/setup/s1/mapped') {
-      setup.mapped = true;
-      return res.end(JSON.stringify({ state: 'wait' }));
+    if (req.url === '/v1/map/start') return res.end(JSON.stringify(mapMode && !mapped ? { state: 'map', crawlId: 'c1', files: mapper() } : { state: 'done' }));
+    if (req.url === '/v1/map/c1/mapped') {
+      mapped = true;
+      return res.end(JSON.stringify({ state: 'done', knowledgeVersion: 2 }));
     }
-    if (req.url === '/v1/setup/s1/status') return res.end(JSON.stringify(setupStatus()));
-    if (req.url === '/v1/runs') {
-      setup.reported = body.round;
-      setup.passed = body.status === 'passed';
-      return res.writeHead(201).end(JSON.stringify({ runId: `run_${body.round}` }));
-    }
-    // The tests folder: test/heal-fixture (its test fails until the heal); the setup's goes to a new folder.
+    if (req.url === '/v1/map/c1/status') return res.end(JSON.stringify(mapped ? { state: 'done', message: 'Mapped 1 page.' } : { state: 'map', message: 'Mapping the application…' }));
+    // The tests folder: test/heal-fixture (its test fails until the heal); "empty" names one that doesn't exist.
     if (req.url === '/v1/tests/prepare')
-      return res.end(JSON.stringify({ testsDir: setupMode ? 'e2e-new' : mode === 'move' ? 'e2e-moving' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review' }));
+      return res.end(JSON.stringify({ testsDir: mode === 'empty' ? 'e2e-none-yet' : mode === 'move' ? 'e2e-moving' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review' }));
     if (req.url === '/v1/tests/snapshot') {
       // The contents travel only when asked for (here: always, the first time).
       if (body.files.some((f) => f.content === undefined) && !body.files.some((f) => f.content !== undefined))
@@ -236,7 +198,6 @@ http
       return res.end(JSON.stringify({ state: 'stored', snapshotId: 'snap1', committed: 0, outdated: 0, files: [], revisionIds: [], pending: [] }));
     }
     if (req.url === '/v1/tests/changes') {
-      if (body.suiteId) return res.end(JSON.stringify(suiteBundle()));
       if (body.whole)
         return res.end(
           JSON.stringify({

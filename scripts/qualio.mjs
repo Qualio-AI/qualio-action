@@ -1,8 +1,8 @@
 // Talks to Qualio from the Qualio action. Node 20, no dependencies.
 //
-//   node qualio.mjs setup <map-dir> <branch> <minutes> [working-directory]
-//                                                sets up the first test suite if the project has none:
-//                                                maps the app, waits, runs each check until done
+//   node qualio.mjs map <map-dir> <branch> <minutes>
+//                                                maps the app when Qualio asks (the first job, or a re-map),
+//                                                hosting a write-guarded browser for mapping.explore
 //   node qualio.mjs prepare <branch> [working-directory]
 //                                                finds the tests folder (qualio.yml tests.path), sends Qualio a
 //                                                snapshot of it, and writes the changes Qualio offers on top
@@ -39,8 +39,6 @@ const apiUrl = (process.env.QUALIO_API_URL ?? '').replace(/\/+$/, '');
 const ALLOW_PULL_REQUESTS_DOCS = `${apiUrl}/docs/getting-started#allow-pull-requests`;
 const apiKey = process.env.QUALIO_API_KEY ?? '';
 const POLL_MS = Number(process.env.QUALIO_POLL_MS || 10_000);
-/** Per test in the setup's checks (generated tests use short action and expect timeouts too). */
-const CHECK_TEST_TIMEOUT_MS = 20_000;
 
 async function output(values) {
   const lines = Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join('');
@@ -137,6 +135,19 @@ async function installReporter(dir) {
   return target;
 }
 
+/**
+ * How the run adds Qualio's reporter. Qualio's generated playwright.config.ts lists it (QUALIO_REPORTER);
+ * a team's own config doesn't, so the run names it on the command line, with the list and HTML reporters
+ * (the command line replaces the config's reporters). Empty when the config already has it.
+ */
+async function reporterArgs(dir, reporter) {
+  for (const name of ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs', 'playwright.config.cjs']) {
+    const text = await readFile(path.join(dir, name), 'utf8').catch(() => null);
+    if (text !== null) return text.includes('QUALIO_REPORTER') ? '' : `--reporter=list,html,${reporter}`;
+  }
+  return '';
+}
+
 /** The pull request number of a pull_request job, else null. */
 async function eventPrNumber() {
   if (!/^pull_request/.test(process.env.GITHUB_EVENT_NAME ?? '') || !process.env.GITHUB_EVENT_PATH) return null;
@@ -200,118 +211,85 @@ async function install(dir) {
 
 const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 
-// Job summary blocks, as Qualio writes them on GitHub (@qualio/shared/github-markdown in qualio-webapp).
-const alert = (kind, body) => [`> [!${kind}]`, ...body.trim().split('\n').map((line) => (line.trim() ? `> ${line}` : '>'))].join('\n');
+// Job summary table cells, as Qualio writes them on GitHub (@qualio/shared/github-markdown in qualio-webapp).
 const cell = (text, max = 200) => {
   const line = String(text).replace(/\s*\n\s*/g, ' ').trim();
   return (line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line).replace(/\|/g, '\\|');
 };
-const details = (title, body) => `<details><summary>${title}</summary>\n\n${body}\n\n</details>`;
 
 async function summary(lines) {
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${lines.join('\n')}\n`);
 }
 
 /**
- * Sets up the project's first test suite in this job, if it has none that passed yet (Qualio
- * answers "done" otherwise): the mapper Qualio sends maps the application here, Qualio plans,
- * specifies and codes the suite while this job waits, then every check downloads the suite's tests
- * and runs them (reported as round <check>) until Qualio has repaired or dropped every failing test.
- * Outputs state: ready (it already had one), completed (set up now).
+ * Maps the application in this job when Qualio asks (the project's first job, or after someone asked to
+ * map it again): the mapper Qualio sends crawls the app here (signed out and as each role, with the job's
+ * E2E_<ROLE>_* secrets), and with qualio.yml's mapping.explore this job then hosts a write-guarded browser
+ * while Qualio explores what links can't reach. Mapping generates no tests and never fails the job: a
+ * problem is a warning, and the next job maps again. Outputs state: mapped, skipped (nothing to map, or an
+ * older Qualio), failed.
  */
-async function setup(mapDir, branch, minutes, input = '') {
-  const start = await call('/v1/setup/start', { branch, ghRunId: process.env.GITHUB_RUN_ID || '0' });
-  if (start.status !== 200) throw new Error(`Starting the setup failed (${start.status}): ${start.body.error ?? 'unknown error'}`);
-  let state = start.body;
-  if (state.state === 'done') {
-    console.log('This project’s first test suite is ready.');
-    return output({ state: 'ready' });
+async function map(mapDir, branch, minutes) {
+  const start = await call('/v1/map/start', { branch, ghRunId: process.env.GITHUB_RUN_ID || '0' });
+  // An older Qualio maps through the first-suite setup, which it no longer runs for this action.
+  if (start.status === 404) return output({ state: 'skipped' });
+  if (start.status !== 200) {
+    console.log(`::warning title=Qualio::Asking Qualio whether to map the application failed (${start.status}): ${start.body.error ?? 'unknown error'}. The tests run as usual.`);
+    return output({ state: 'failed' });
   }
-  const { suiteId } = state;
-  console.log(`::notice title=Qualio::Setting up the first test suite: this run maps the application, then checks the generated tests here until they pass. It takes longer than later runs.`);
+  let state = start.body;
+  if (state.state !== 'map') return output({ state: 'skipped' });
+  const { crawlId } = state;
   const deadline = Date.now() + Number(minutes) * 60_000;
-  let mapped = false;
-  let checked = 0;
-  let said = '';
+  console.log('::group::Map the application');
+  try {
+    await writeFiles(mapDir, state.files);
+    await install(mapDir);
+    const code = await run('npx', ['playwright', 'test', '-c', 'qualio-map.config.ts'], { cwd: mapDir });
+    if (code !== 0) console.log('::warning title=Qualio::Mapping the application reported a problem (see the "Map the application" group).');
+  } catch (error) {
+    console.log(`::warning title=Qualio::Mapping the application failed: ${error.message}. The tests run as usual; the next job maps again.`);
+    return output({ state: 'failed' });
+  } finally {
+    console.log('::endgroup::');
+  }
   // mapping.explore: while Qualio explores what links can't reach, this job hosts the browser (writes blocked).
   const live = liveDiagnosis(mapDir);
   let host = null;
-  const stopHost = async () => {
-    if (!host) return;
-    const stopping = host;
-    host = null;
-    await stopping.stop();
-    if (stopping.stats.opened || stopping.stats.failed) console.log(`Exploring: Qualio clicked ${plural(stopping.stats.opened, 'control')} in this job's browser${stopping.stats.failed ? ` (${stopping.stats.failed} couldn't be clicked)` : ''}, with every write blocked.`);
-  };
+  let said = '';
   try {
     for (;;) {
+      const status = await call(`/v1/map/${crawlId}/status`, { ...(live && { browser: true }) });
+      if (status.status !== 200) {
+        console.log(`::warning title=Qualio::Reading the map's status failed (${status.status}): ${status.body.error ?? 'unknown error'}.`);
+        return output({ state: 'failed' });
+      }
+      state = status.body;
       if (state.message && state.message !== said) console.log((said = state.message));
       if (live && state.browser && !host) {
         console.log("Qualio is exploring what links can't reach (dialogs, tabs, menus) through this job's browser. Every request that could change data is blocked there.");
         host = startBrowserHost(state.browser, { call, ...live, log: (line) => console.log(line.replace(/^Live diagnosis:/, 'Exploring:')) });
-      } else if (host && !state.browser) await stopHost();
-      if (state.state === 'map') {
-        if (mapped) throw new Error('The map of the application did not reach Qualio. Check the mapper’s output above.');
-        mapped = true;
-        console.log('::group::Map the application');
-        await writeFiles(mapDir, state.files);
-        await install(mapDir);
-        const code = await run('npx', ['playwright', 'test', '-c', 'qualio-map.config.ts'], { cwd: mapDir });
-        console.log('::endgroup::');
-        if (code !== 0) console.log('::warning title=Qualio::Mapping the application reported a problem (see the "Map the application" group).');
-      } else if (state.state === 'validate') {
-        if (state.round <= checked) throw new Error(`The results of check ${checked} did not reach Qualio. Check the [qualio] lines in its output.`);
-        checked = state.round;
-        console.log(`::group::Check ${checked}: run the generated tests`);
-        // The suite's tests, written into the tests folder of this checkout (never committed by this job).
-        const folder = await testsFolder(branch, input);
-        const testsDir = folder.abs;
-        await mkdir(testsDir, { recursive: true });
-        const has = (await testFiles(testsDir)).map((f) => f.path);
-        const changes = await call('/v1/tests/changes', { branch, suiteId, has });
-        if (changes.status !== 200) throw new Error(`Getting the tests to check failed (${changes.status}): ${changes.body.error ?? 'unknown error'}`);
-        await applyFiles(testsDir, changes.body.files);
-        await writeManifest(`suite-${suiteId}-${checked}`, changes.body.revisionIds);
-        process.env.QUALIO_REPORTER = await installReporter(testsDir);
-        await install(testsDir);
-        // Failures are expected here: Qualio repairs those tests (or drops them) and the next check runs.
-        // No retries and a short test timeout: a retry tells Qualio nothing new and only costs the job's time.
-        await run('npx', ['playwright', 'test', '--retries=0', `--timeout=${CHECK_TEST_TIMEOUT_MS}`], { cwd: testsDir, env: { QUALIO_RUN_ROUND: String(checked) } });
-        console.log('::endgroup::');
-      } else if (state.state === 'done') {
-        const result = state.result ?? { tests: 0, features: 0, dropped: [] };
-        const counts = `${plural(result.tests, 'test')} across ${plural(result.features, 'feature')}`;
-        console.log(`The first test suite is ready: ${counts}, all passing. Qualio opens a pull request into ${branch} that adds them to the repository.`);
-        await summary([
-          '### 🎉 Qualio: first test suite ready',
-          '',
-          alert('TIP', `✅ ${counts}, all passing in this job (check ${state.round}). Qualio opens a pull request into \`${branch}\` that adds them: merge it, then this one.${state.url ? ` [Open it in Qualio](${state.url})` : ''}`),
-          ...(result.dropped.length
-            ? [
-                '',
-                details(
-                  `⚠️ Left out (${result.dropped.length})`,
-                  [
-                    '|  | Feature | Test | Reason |',
-                    '|---|---|---|---|',
-                    ...result.dropped.map((d) => `| ${d.bug ? '🐞' : '⏭️'} | ${cell(d.featureKey, 40)} | ${cell(d.test)} | ${cell(`${d.reason}${d.bug ? ': looks like an application bug' : ''}`, 300)} |`),
-                  ].join('\n'),
-                ),
-              ]
-            : []),
-        ]);
-        return output({ state: 'completed' });
-      } else if (state.state === 'failed') {
-        throw new Error(`Setting up the first test suite failed: ${state.error ?? 'unknown error'}${state.url ? ` (${state.url})` : ''}`);
       }
-      if (Date.now() >= deadline) throw new Error(`The first test suite was not ready after ${minutes} minutes. Re-run the workflow to continue where it stopped.`);
-      if (state.state === 'wait') await new Promise((r) => setTimeout(r, POLL_MS));
-      const status = await call(`/v1/setup/${suiteId}/status`, { ...(live && { browser: true }) });
-      if (status.status !== 200) throw new Error(`Reading the setup status failed (${status.status}): ${status.body.error ?? 'unknown error'}`);
-      state = status.body;
+      if (state.state === 'done') return output({ state: 'mapped' });
+      if (state.state === 'failed') {
+        console.log(`::warning title=Qualio::Mapping the application failed: ${state.error ?? 'unknown error'}. The tests run as usual; the next job maps again.`);
+        return output({ state: 'failed' });
+      }
+      if (state.state === 'map') {
+        console.log('::warning title=Qualio::The map of the application did not reach Qualio. Check the mapper’s output above; the next job maps again.');
+        return output({ state: 'failed' });
+      }
+      if (Date.now() >= deadline) {
+        console.log(`::warning title=Qualio::Qualio was still exploring after ${minutes} minutes: the map keeps what it found so far.`);
+        return output({ state: 'mapped' });
+      }
+      await new Promise((r) => setTimeout(r, POLL_MS));
     }
   } finally {
-    await stopHost();
+    if (host) {
+      await host.stop();
+      if (host.stats.opened || host.stats.failed) console.log(`Exploring: Qualio clicked ${plural(host.stats.opened, 'control')} in this job's browser${host.stats.failed ? ` (${host.stats.failed} couldn't be clicked)` : ''}, with every write blocked.`);
+    }
   }
 }
 
@@ -323,7 +301,6 @@ async function setup(mapDir, branch, minutes, input = '') {
  * Outputs dir (absolute), run (true/false).
  */
 async function prepare(branch, input = '') {
-  if (process.env.SETUP_STATE === 'completed') return output({ run: 'false', dir: '' });
   const folder = await testsFolder(branch, input);
   const dir = folder.abs;
   const hasConfig = (await exists(path.join(dir, 'package.json'))) && ((await exists(path.join(dir, 'playwright.config.ts'))) || (await exists(path.join(dir, 'playwright.config.js'))));
@@ -343,8 +320,8 @@ async function prepare(branch, input = '') {
     return output({ run: 'true', dir });
   }
   const missing = !(await exists(dir));
-  // Offline (no api-key) there is nothing else to run; with Qualio, its changes may bring the folder (the
-  // first suite or new tests in a Qualio pull request not merged yet).
+  // Offline (no api-key) there is nothing else to run; with Qualio, its changes may bring the folder (new
+  // tests in a Qualio pull request not merged yet).
   if (missing && folder.offline) throw new Error(missingFolder(folder.rel));
   if (!missing && !hasConfig) throw new Error(`'${folder.rel}' has no package.json and playwright.config.ts. Is tests.path the folder that holds your E2E tests?`);
 
@@ -369,7 +346,11 @@ async function prepare(branch, input = '') {
   if (status !== 200 || body.state !== 'stored') throw new Error(`Sending the tests folder to Qualio failed (${status}): ${body.error ?? 'unknown error'}`);
   if (body.committed) console.log(`Qualio sees ${plural(body.committed, 'of its changes')} committed on ${branch}.`);
   if (body.outdated) console.log(`::notice title=Qualio::${plural(body.outdated, 'of Qualio\'s changes')} no longer fit (the lines changed since): Qualio looks again if the tests fail.`);
-  if (missing && !body.files.some((f) => f.path === 'package.json' && f.content !== null)) throw new Error(missingFolder(folder.rel));
+  // No tests yet: Qualio writes them for the pull requests that name an approved ticket, starting the folder.
+  if (missing && !body.files.some((f) => f.path === 'package.json' && f.content !== null)) {
+    console.log(`::notice title=Qualio::There are no tests in '${folder.rel}' yet. Qualio writes tests for the pull requests that name an approved ticket, starting the folder; until then this job has nothing to run.`);
+    return output({ run: 'false', dir });
+  }
   if (body.files.length) {
     await applyFiles(dir, body.files);
     console.log(`Applied ${plural(body.revisionIds.length, 'change')} Qualio offers on ${branch} (${plural(body.files.length, 'file')}): they run here before they're committed.`);
@@ -378,7 +359,9 @@ async function prepare(branch, input = '') {
   for (const { key, reason } of body.pending ?? [])
     console.log(`::notice title=Qualio::${key} has no tests in this run yet: ${reason}. Qualio runs this workflow again once they are written.`);
   process.env.QUALIO_REPORTER = await installReporter(dir);
-  await output({ reporter: process.env.QUALIO_REPORTER, mode: 'repo' });
+  const args = await reporterArgs(dir, process.env.QUALIO_REPORTER);
+  if (args) console.log("Your playwright.config doesn't list Qualio's reporter: this job adds it to the run (with the list and HTML reporters).");
+  await output({ reporter: process.env.QUALIO_REPORTER, 'reporter-args': args, mode: 'repo' });
   await output({ run: 'true', dir });
 }
 
@@ -1003,9 +986,10 @@ async function errored(conclusion) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-const commands = { setup, prepare, apply, wait, look, sync, config, outbox, errored, comment };
+// `setup`: the name of the map step before phase 54.
+const commands = { map, setup: map, prepare, apply, wait, look, sync, config, outbox, errored, comment };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use setup, prepare, apply, wait, look, sync, config, outbox, errored or comment.`);
+  console.error(`Unknown command "${command}". Use map, prepare, apply, wait, look, sync, config, outbox, errored or comment.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {
