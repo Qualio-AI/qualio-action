@@ -10,6 +10,8 @@
 //   node qualio.mjs wait <run-file> <minutes>    waits for the heal of the run the reporter wrote; meanwhile hosts a
 //                                                browser on the app for Qualio's diagnosis (live diagnosis, see
 //                                                browser-host.mjs; QUALIO_LIVE_DIAGNOSIS=false turns it off)
+//   node qualio.mjs look <branch> <minutes>      at the end of the job: if a test chat in Qualio asked to look at the
+//                                                running app on this branch, hosts the browser while it looks
 //   node qualio.mjs sync                         tells Qualio about this pull request (title, branch, head, merged)
 //   node qualio.mjs config <branch>              sends qualio.yml's config (CONFIG or CONFIG_FILE) and the overview
 //                                                documents it names; fails the job when the config is invalid
@@ -452,6 +454,28 @@ function liveDiagnosis(dir = process.env.QUALIO_TESTS_DIR) {
     return null;
   }
   return { baseUrl, testsDir, tempDir: path.join(process.env.RUNNER_TEMP || tmpdir(), 'qualio-live') };
+}
+
+/**
+ * At the end of the job: whether a test chat in Qualio wants to look at the running app on this branch
+ * (it asked after the failed run's job was gone, and Qualio started this workflow). If one does, the job
+ * hosts the look-only browser until Qualio says the chat is done, or `minutes` pass.
+ */
+async function look(branch, minutes = '10') {
+  const live = liveDiagnosis();
+  if (!live || !(Number(minutes) > 0)) return;
+  const { status, body } = await call('/v1/browser/look', { branch });
+  // An older Qualio has no test chat looks.
+  if (status === 404) return;
+  if (status !== 200) return console.log(`::warning title=Qualio::Could not ask Qualio whether a test chat wants to look at the app (${status}): ${body.error ?? 'unknown error'}`);
+  if (!body.browser) return;
+  console.log(`A test chat in Qualio is looking at the running app through this job, for up to ${minutes} minute(s): pages are only opened, never clicked or filled in.`);
+  const host = startBrowserHost(body.browser, { call, ...live });
+  let timer;
+  await Promise.race([host.done, new Promise((r) => (timer = setTimeout(r, Number(minutes) * 60_000)))]);
+  clearTimeout(timer);
+  await host.stop();
+  console.log(`Test chat: Qualio looked at ${plural(host.stats.opened, 'page')} of the running app${host.stats.failed ? ` (${host.stats.failed} couldn't be shown)` : ''}.`);
 }
 
 async function sync() {
@@ -979,9 +1003,9 @@ async function errored(conclusion) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-const commands = { setup, prepare, apply, wait, sync, config, outbox, errored, comment };
+const commands = { setup, prepare, apply, wait, look, sync, config, outbox, errored, comment };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use setup, prepare, apply, wait, sync, config, outbox, errored or comment.`);
+  console.error(`Unknown command "${command}". Use setup, prepare, apply, wait, look, sync, config, outbox, errored or comment.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {

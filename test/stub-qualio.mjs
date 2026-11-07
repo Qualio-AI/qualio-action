@@ -254,6 +254,9 @@ http
       const finished = !body.browser || browserAnswers.length >= browserQueue.length;
       return res.end(JSON.stringify({ status: finished ? 'not_healable' : 'running', ...(!finished && body.browser && { browser: { sessionId: 'live1', roles: LIVE_ROLES } }) }));
     }
+    // A test chat's look: only a job on the branch the chat asked about hosts it.
+    if (req.url === '/v1/browser/look' && mode === 'live')
+      return res.end(JSON.stringify(body.branch === 'demo/rename' ? { browser: { sessionId: 'live1', roles: LIVE_ROLES } } : {}));
     if (req.url === '/v1/browser/next') {
       if (body.sessionId !== 'live1') return res.writeHead(404).end(JSON.stringify({ error: 'Browser session not found' }));
       const next = browserQueue.find((c) => !c.taken);

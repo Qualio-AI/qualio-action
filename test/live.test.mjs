@@ -30,12 +30,12 @@ async function stub(mode) {
   return url;
 }
 
-function waitStep(url, env) {
+function waitStep(url, env, command = (runFile) => ['wait', runFile, '1']) {
   const dir = mkdtempSync(path.join(tmpdir(), 'qualio-live-'));
   const runFile = path.join(dir, 'run.json');
   writeFileSync(runFile, JSON.stringify({ runId: 'run_1', status: 'FAILED', heal: 'queued' }));
   const log = path.join(dir, 'mcp.log');
-  const out = execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'wait', runFile, '1'], {
+  const out = execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), ...command(runFile)], {
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -109,6 +109,28 @@ test("shows the pages Qualio asks for, signed in by the job, and refuses everyth
   }
   // The password never travels to Qualio.
   assert.ok(!JSON.stringify(calls).includes('s3cret-pw'));
+});
+
+test("hosts the browser at the end of the job while a test chat looks at the app on its branch", async () => {
+  const url = await stub('live');
+  const { out, starts } = waitStep(url, {}, () => ['look', 'demo/rename', '1']);
+  assert.match(out, /A test chat in Qualio is looking at the running app/);
+  assert.match(out, /Test chat: Qualio looked at 3 pages of the running app/);
+  assert.equal(starts.length, 2);
+  const calls = await (await fetch(`${url}/__calls`)).json();
+  assert.deepEqual(calls.find((c) => c.route === '/v1/browser/look').body, { branch: 'demo/rename' });
+});
+
+test('hosts nothing at the end of the job when no chat asked, or with look-minutes 0 or live diagnosis off', async () => {
+  const url = await stub('live');
+  for (const [branch, env, minutes] of [['main', {}, '1'], ['demo/rename', {}, '0'], ['demo/rename', { QUALIO_LIVE_DIAGNOSIS: 'false' }, '1']]) {
+    const { out, starts } = waitStep(url, env, () => ['look', branch, minutes]);
+    assert.equal(out.trim(), '');
+    assert.deepEqual(starts, []);
+  }
+  const calls = await (await fetch(`${url}/__calls`)).json();
+  assert.equal(calls.filter((c) => c.route === '/v1/browser/look').length, 1);
+  assert.ok(!calls.some((c) => c.route === '/v1/browser/next'));
 });
 
 test('checkableLocator lets only getBy… locators through', () => {
