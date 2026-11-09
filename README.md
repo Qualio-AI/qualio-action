@@ -335,7 +335,7 @@ Releases are tagged `v1.x.y`, and the `v1` tag moves to the latest `v1` release.
 
 ## Part 3: Publishing this action
 
-This repository lives at **[`github.com/Qualio-AI/qualio-action`](https://github.com/Qualio-AI/qualio-action)**. GitHub owner names are case-insensitive, so the `qualio-ai/qualio-action@v1` reference in customers' `qualio.yml` (the default `QUALIO_ACTION_REF` in `qualio-webapp/packages/agents/src/coder/scaffold.ts`) resolves to it. Released so far: `v1.0.0` and `v1.1.0` (`tests-source: qualio`), with `v1` on `v1.1.0`. The next release (tests in the repository, suggestions and Qualio's pull requests) must ship with qualio-webapp's phase 49: older `v1` releases call `/v1/tests/bundle`, which answers 410 from then on.
+This repository lives at **[`github.com/Qualio-AI/qualio-action`](https://github.com/Qualio-AI/qualio-action)**. GitHub owner names are case-insensitive, so the `qualio-ai/qualio-action@v1` reference in customers' `qualio.yml` (the default `QUALIO_ACTION_REF` in `qualio-webapp/packages/agents/src/coder/scaffold.ts`) resolves to it. Released so far: `v1.0.0` to `v1.6.0`, with `v1` on `v1.6.0` (mapping instead of a first suite, a team's own tests, the test chat's looks at the app). Since `v1.5.0` the tests live in the repository; releases before it call `/v1/tests/bundle`, which qualio-webapp answers with 410 from phase 49 on.
 
 ### 1. Make it public and allow it to be used
 
