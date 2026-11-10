@@ -93,7 +93,7 @@ outputs:
     description: With command plan, the shards for the e2e job's matrix, as a JSON list (e.g. [1,2,3]).
     value: ${{ steps.plan.outputs.shards || '[1]' }}
   plan-id:
-    description: With command plan, the plan the e2e jobs pass as shard-plan. Empty when one job runs every test.
+    description: With command plan, the plan the e2e jobs pass as shard-plan (also when it is one job, so Qualio knows the workflow is sharded). Empty when there is no plan (Playwright couldn't list the tests, or Qualio couldn't plan).
     value: ${{ steps.plan.outputs.plan-id }}
 
 runs:

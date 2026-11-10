@@ -264,7 +264,7 @@ Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
 | `config-scope` | Where this job's config applied: `project`, `branch` or `none`. Empty without `config`/`config-file`. |
 | `map-state` | `mapped` (this job mapped the app), `skipped` (Qualio didn't ask) or `failed` (mapping failed; the job goes on). Empty without an `api-key`. |
 | `setup-state` | Deprecated (the first-suite setup is gone): always empty. |
-| `run`, `shards`, `plan-id` | With `command: plan`: whether the `e2e` jobs have tests to run, the shards for their matrix as a JSON list (e.g. `[1,2,3]`), and the plan they pass as `shard-plan` (empty when one job runs every test). |
+| `run`, `shards`, `plan-id` | With `command: plan`: whether the `e2e` jobs have tests to run, the shards for their matrix as a JSON list (e.g. `[1,2,3]`), and the plan they pass as `shard-plan` (also for a plan of one job; empty only when there is no plan). |
 | `heal-status` | How healing a failed run ended: `patched`, `proposed` (the project asks first: someone decides in Qualio), `declined`, `not_healable`, `stopped`, `failed`, `timeout` or `none`. Empty when the tests passed or weren't run. |
 
 ### Configuration

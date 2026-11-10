@@ -1053,7 +1053,8 @@ async function plan(branch, dir) {
   };
   const files = await listTests(dir);
   if (!files) return single('Playwright could not list the tests, so they are not split across jobs.');
-  if (files.length < 2) return single();
+  // Even one file is planned: the plan says this workflow is sharded (Qualio's advice relies on it).
+  if (!files.length) return single();
   const { GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT } = process.env;
   if (!GITHUB_RUN_ID) return single();
   const { status, body } = await call('/v1/tests/plan', {
@@ -1070,7 +1071,8 @@ async function plan(branch, dir) {
   if (body.shards.length > 1)
     console.log(`Qualio splits ${plural(files.length, 'test file')} across ${body.shards.length} jobs (about ${minutes(body.predictedMs)}, instead of ${minutes(body.singleJobMs)} in one job).`);
   else console.log(`One job runs the ${plural(files.length, 'test file')}: more jobs wouldn't make the run faster.`);
-  await output({ run: 'true', shards: JSON.stringify(body.shards), 'plan-id': body.shards.length > 1 ? body.planId : '' });
+  // The plan id goes out with one job too: that job reports the plan, so Qualio knows the workflow is sharded.
+  await output({ run: 'true', shards: JSON.stringify(body.shards), 'plan-id': body.planId });
 }
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

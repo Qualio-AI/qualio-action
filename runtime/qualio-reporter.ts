@@ -114,12 +114,14 @@ export function ciContext(env: NodeJS.ProcessEnv = process.env) {
 
 /**
  * This job's shard when the Qualio action runs the tests across several jobs (QUALIO_SHARD_INDEX of
- * QUALIO_SHARD_TOTAL, from the shard plan QUALIO_SHARD_PLAN): the jobs report into one run.
+ * QUALIO_SHARD_TOTAL, from the shard plan QUALIO_SHARD_PLAN): the jobs report into one run. A plan of
+ * one job is sent too, so Qualio knows the workflow is sharded (it just needed one job this time).
  */
 export function shardContext(env: NodeJS.ProcessEnv = process.env, now = Date.now()) {
   const index = Number(env.QUALIO_SHARD_INDEX);
   const total = Number(env.QUALIO_SHARD_TOTAL);
-  if (!Number.isInteger(index) || !Number.isInteger(total) || total < 2 || index < 1 || index > total) return null;
+  if (!Number.isInteger(index) || !Number.isInteger(total) || total < 1 || index < 1 || index > total) return null;
+  if (total < 2 && !env.QUALIO_SHARD_PLAN) return null;
   // The job's setup time (checkout, install, the app) until the tests start: the planner weighs it.
   const startedAt = Number(env.QUALIO_JOB_STARTED_AT) * 1000;
   const setupMs = startedAt > 0 && now >= startedAt ? Math.round(now - startedAt) : null;

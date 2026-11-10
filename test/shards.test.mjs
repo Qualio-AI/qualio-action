@@ -87,7 +87,8 @@ test('one job runs everything when one is enough, or when Playwright cannot list
   const ws = await workspace();
   const one = run(url, ws, ['plan', 'main', '.'], { QUALIO_PLAYWRIGHT_LIST: await listing(ws) });
   assert.match(one.log, /One job runs the 3 test files/);
-  assert.deepEqual(await outputsOf(one.outputs), { run: 'true', shards: '[1]', 'plan-id': '' });
+  // The plan id still goes to the job: its run records that the workflow is sharded.
+  assert.deepEqual(await outputsOf(one.outputs), { run: 'true', shards: '[1]', 'plan-id': 'p1' });
 
   const broken = path.join(ws, 'broken');
   await writeFile(path.join(ws, 'broken.json'), 'not json');
