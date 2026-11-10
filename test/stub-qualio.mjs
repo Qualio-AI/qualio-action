@@ -213,7 +213,9 @@ http
       // The contents travel only when asked for (here: always, the first time).
       if (body.files.some((f) => f.content === undefined) && !body.files.some((f) => f.content !== undefined))
         return res.end(JSON.stringify({ state: 'contents', missing: body.files.map((f) => f.sha256) }));
-      return res.end(JSON.stringify({ state: 'stored', snapshotId: 'snap1', committed: 0, outdated: 0, files: [], revisionIds: [], pending: [] }));
+      // "binary": Qualio's answer (wrongly) changes a binary file of the folder, which the action refuses to write.
+      const files = mode === 'binary' ? [{ path: 'fixtures/students.xlsx', content: 'not a workbook' }, { path: 'fixtures/notes.txt', content: 'changed' }] : [];
+      return res.end(JSON.stringify({ state: 'stored', snapshotId: 'snap1', committed: 0, outdated: 0, files, revisionIds: files.length ? ['b1'] : [], pending: [] }));
     }
     if (req.url === '/v1/tests/changes') {
       if (body.whole)

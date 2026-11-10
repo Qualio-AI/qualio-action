@@ -31,6 +31,7 @@ import { appendFile, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { describeBinary, isBinary } from './binary.mjs';
 import { startBrowserHost } from './browser-host.mjs';
 import { commentableLines, suggestionBlock, suggestionComments } from './diff.mjs';
 
@@ -100,7 +101,9 @@ async function testFiles(dir) {
           console.log(`::warning title=Qualio::${childRel} is over ${MAX_FILE_BYTES / 1024 / 1024} MB and is not sent to Qualio.`);
           continue;
         }
-        out.push({ path: childRel, content: await readFile(childAbs, 'utf8') });
+        // A binary file (a committed .xlsx, a PDF) travels as a text description: never as mangled UTF-8.
+        const bytes = await readFile(childAbs);
+        out.push(isBinary(bytes) ? { path: childRel, content: describeBinary(childRel, bytes), binary: true } : { path: childRel, content: bytes.toString('utf8') });
       }
       if (out.length > MAX_SNAPSHOT_FILES) throw new Error(`The tests folder has over ${MAX_SNAPSHOT_FILES} files. Point qualio.yml's tests.path at the E2E tests only.`);
     }
@@ -109,10 +112,15 @@ async function testFiles(dir) {
   return out;
 }
 
-/** Writes files on top of a folder: null content deletes the file. */
+/** Writes files on top of a folder: null content deletes the file. Binary files are never Qualio's to change. */
 async function applyFiles(dir, files) {
   for (const file of files) {
     const target = safePath(dir, file.path);
+    const current = await readFile(target).catch(() => null);
+    if (current && isBinary(current)) {
+      console.log(`::warning title=Qualio::${file.path} is a binary file: Qualio's change to it was not applied.`);
+      continue;
+    }
     if (file.content === null) await rm(target, { force: true });
     else {
       await mkdir(path.dirname(target), { recursive: true });

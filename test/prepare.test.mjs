@@ -4,6 +4,7 @@
 //   node --test test/*.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,6 +85,38 @@ test('sends the tests folder and writes the changes Qualio offers on top', async
   run(url, ws, ['apply', tests, 'feature/sch-9', 'repo']);
   assert.match(await readFile(path.join(tests, 'tests/login.spec.ts'), 'utf8'), /name: 'Log in'/);
   assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')), { bundleId: 'repo', revisionIds: ['r2'] });
+});
+
+test('binary files travel as a description, and Qualio never writes over them', async () => {
+  const url = await stub('binary');
+  const ws = await workspace();
+  const tests = path.join(ws, 'test/heal-fixture');
+  await mkdir(path.join(tests, 'fixtures'), { recursive: true });
+  await writeFile(path.join(tests, 'package.json'), '{}');
+  await writeFile(path.join(tests, 'playwright.config.ts'), 'export default {};');
+  const workbook = await readFile(path.join(root, 'test/data/students.xlsx'));
+  await writeFile(path.join(tests, 'fixtures/students.xlsx'), workbook);
+  await writeFile(path.join(tests, 'fixtures/logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]));
+  await writeFile(path.join(tests, 'fixtures/notes.txt'), 'plain text');
+
+  const { log } = run(url, ws, ['prepare', 'feature/import']);
+  const calls = await (await fetch(`${url}/__calls`)).json();
+  const sent = calls.filter((c) => c.route === '/v1/tests/snapshot')[1].body.files;
+  const xlsx = sent.find((f) => f.path === 'fixtures/students.xlsx').content;
+  assert.equal(
+    xlsx,
+    `[qualio:binary] Excel workbook, ${workbook.length} bytes, sha256 ${createHash('sha256').update(workbook).digest('hex')}\n` +
+      "Not sent to Qualio. Tests read it with fixtureFile('fixtures/students.xlsx') from support/files; Qualio never changes it.\n" +
+      'Sheet "Export": 3 rows\n  1: Name | Email | Grade\n  2: Jane Doe | jane@x.com | 9\n  3: Li, Wei |  | Grade 10\n',
+  );
+  assert.match(sent.find((f) => f.path === 'fixtures/logo.png').content, /^\[qualio:binary\] PNG image, 12 bytes, sha256 [0-9a-f]{64}\n/);
+  assert.equal(sent.find((f) => f.path === 'fixtures/notes.txt').content, 'plain text');
+  // The hash is the description's: what Qualio stores is what it was sent.
+  assert.equal(sent.find((f) => f.path === 'fixtures/students.xlsx').sha256, createHash('sha256').update(xlsx).digest('hex'));
+
+  assert.match(log, /fixtures\/students\.xlsx is a binary file: Qualio's change to it was not applied/);
+  assert.deepEqual(await readFile(path.join(tests, 'fixtures/students.xlsx')), workbook);
+  assert.equal(await readFile(path.join(tests, 'fixtures/notes.txt'), 'utf8'), 'changed');
 });
 
 test('a project whose tests Qualio still keeps runs them from Qualio while the move waits', async () => {
