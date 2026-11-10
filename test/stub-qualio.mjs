@@ -33,6 +33,8 @@ const REPORT = '<!-- qualio:report -->\n\n### ✅ Qualio: Ready to merge';
 const outbox =
   reportLost
     ? [{ id: 'r1', kind: 'REPORT', prNumber: 7, sha: null, payload: { prNumber: 7, body: REPORT, commentId: 404 } }]
+    : mode === 'sharding'
+    ? [{ id: 's1', kind: 'SHARDING_CHANGE', prNumber: null, sha: null, payload: null }]
     : mode === 'changes' || mode === 'changes-refused'
     ? [{ id: 'c1', kind: 'TEST_CHANGES', prNumber: 7, sha: null, payload: null }]
     : process.argv[3] === 'outbox'
@@ -77,7 +79,8 @@ test('signs in', async ({ page }) => {
 // "changes": what the repository has on pull request #7's head (feature/sch-9), and Qualio's three changes.
 const PAGE = "export class StudentsPage {\n  constructor(page) { this.page = page; }\n  add() { return this.page.getByRole('button', { name: 'Add student' }); }\n  search() { return this.page.getByRole('searchbox', { name: 'Search' }); }\n}\n";
 const LIST = "export const list = (page) => page.getByRole('table', { name: 'Students' });\n";
-const repoFiles = { 'e2e/pages/students.page.ts': PAGE, 'e2e/pages/list.page.ts': LIST };
+const SHARDING_CONFIG = 'version: 1\ntests:\n  path: e2e\n  shards:\n    max: 4\n    suggest: true\n';
+const repoFiles = { 'e2e/pages/students.page.ts': PAGE, 'e2e/pages/list.page.ts': LIST, '.qualio/config.yml': SHARDING_CONFIG };
 const sha256 = (t) => createHash('sha256').update(t).digest('hex');
 const testChanges = () => ({
   branch: 'feature/sch-9',
@@ -100,6 +103,18 @@ const testChanges = () => ({
   ],
 });
 const github = { reviews: [], trees: [], commits: [], refs: [], pulls: [] };
+// "sharding": Qualio proposes tests.shards.max: 10 in the config file (specs/auto-sharding.md).
+const shardingChange = () => ({
+  qualioBranch: 'qualio/sharding',
+  branch: 'main',
+  path: '.qualio/config.yml',
+  content: SHARDING_CONFIG.replace('max: 4', 'max: 10'),
+  baseSha256: sha256(SHARDING_CONFIG),
+  title: 'Qualio: run the E2E tests on up to 10 jobs',
+  body: 'Up to 10 jobs would save about 12 min per run.',
+  close: false,
+  qualioPr: null,
+});
 
 const pkg = { path: 'package.json', content: JSON.stringify({ name: 'qualio-e2e', private: true, devDependencies: { '@playwright/test': '1.64.1' } }, null, 2) };
 
@@ -136,7 +151,7 @@ http
     calls.push({ route: req.url, method: req.method, auth: req.headers.authorization === 'Bearer qk_stub', body });
     res.setHeader('content-type', 'application/json');
     // GitHub's REST API, as the outbox uses it (any token).
-    if (req.url.startsWith('/repos/acme/app/') && (mode === 'changes' || mode === 'changes-refused')) {
+    if (req.url.startsWith('/repos/acme/app/') && (mode === 'changes' || mode === 'changes-refused' || mode === 'sharding')) {
       const route = req.url.slice('/repos/acme/app'.length);
       if (req.method === 'GET' && route === '/pulls/7') return res.end(JSON.stringify({ number: 7, state: 'open', head: { sha: 'head7' } }));
       if (req.method === 'GET' && route.startsWith('/pulls/7/files'))
@@ -262,7 +277,14 @@ http
     }
     if (req.url === '/v1/pr/comment') return res.end(JSON.stringify(/^\/qualio /.test(body.body) ? { outcome: 'command', command: body.body.split(' ')[1] } : { outcome: 'answered' }));
     if (req.url === '/v1/pr/outbox')
-      return res.end(JSON.stringify({ items: outbox.filter((i) => !i.sent).map((i) => (i.kind === 'TEST_CHANGES' ? { ...i, payload: body.changes ? testChanges() : null } : i)), waiting: false }));
+      return res.end(
+        JSON.stringify({
+          items: outbox
+            .filter((i) => !i.sent && (i.kind !== 'SHARDING_CHANGE' || body.sharding))
+            .map((i) => (i.kind === 'TEST_CHANGES' ? { ...i, payload: body.changes ? testChanges() : null } : i.kind === 'SHARDING_CHANGE' ? { ...i, payload: shardingChange() } : i)),
+          waiting: false,
+        }),
+      );
     const ack = /^\/v1\/pr\/outbox\/(\w+)\/ack$/.exec(req.url);
     if (ack) {
       const item = outbox.find((i) => i.id === ack[1] && !i.sent);

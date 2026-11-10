@@ -129,3 +129,18 @@ test('a shard that failed before reporting says which shard it was; sharded jobs
   assert.deepEqual(errored, [{ index: 2, total: 3, planId: 'p1' }, { index: 2, planId: 'p1' }, undefined]);
   assert.equal(sent.find((c) => c.url === '/v1/pr/outbox').body.lease, true);
 });
+
+test("opens Qualio's sharding pull request with only the max changed, and acks it", async () => {
+  const url = await stub('sharding');
+  const ws = await workspace();
+  const { log } = run(url, ws, ['outbox'], { GITHUB_REPOSITORY: 'acme/app', GITHUB_TOKEN: 't', GITHUB_API_URL: url, QUALIO_POLL_MS: '10' });
+  assert.match(log, /Qualio pull request #8 \(qualio\/sharding → main\): Qualio: run the E2E tests on up to 10 jobs/);
+  const github = await (await fetch(`${url}/__github`)).json();
+  assert.deepEqual(github.trees[0].tree, [{ path: '.qualio/config.yml', mode: '100644', type: 'blob', content: 'version: 1\ntests:\n  path: e2e\n  shards:\n    max: 10\n    suggest: true\n' }]);
+  assert.deepEqual(github.refs, [{ ref: 'refs/heads/qualio/sharding', sha: 'commit1' }]);
+  assert.deepEqual(github.pulls.map((p) => [p.head, p.base, p.title]), [['qualio/sharding', 'main', 'Qualio: run the E2E tests on up to 10 jobs']]);
+  const outbox = await (await fetch(`${url}/__outbox`)).json();
+  assert.deepEqual(outbox[0].ack, { error: null, sharding: { qualioPr: { number: 8, url: 'https://github.test/acme/app/pull/8', state: 'open' } } });
+  // The outbox asked for sharding changes (an older action wouldn't get them).
+  assert.equal((await calls(url)).find((c) => c.url === '/v1/pr/outbox').body.sharding, true);
+});

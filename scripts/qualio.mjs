@@ -771,11 +771,39 @@ async function deliverTestChanges(repo, item) {
   return { changes: { delivered: [...delivered, ...built.delivered], conflicts: built.conflicts, qualioPr: built.qualioPr ?? null, ...(built.blocked && { blocked: built.blocked }) } };
 }
 
+/**
+ * Qualio's pull request that changes tests.shards.max in the config file (specs/auto-sharding.md: only
+ * with tests.shards.suggest, when clearly worth it): one commit on qualio/sharding from the target
+ * branch's head, opened or updated as a pull request into it, closed when Qualio no longer proposes it.
+ */
+async function deliverShardingChange(repo, item) {
+  const p = { ...item.payload, testsDir: '' };
+  if (p.qualioPr) {
+    const r = await github('GET', `${repo}/pulls/${p.qualioPr.number}`);
+    if (ok(r) && r.data.state === 'closed') return { sharding: { qualioPr: { number: r.data.number, url: r.data.html_url, state: r.data.merged ? 'merged' : 'closed' } } };
+  }
+  if (p.close) {
+    if (!p.qualioPr) return { sharding: {} };
+    await retireQualioPullRequest(repo, p);
+    return { sharding: { retired: p.qualioPr.number } };
+  }
+  const built = await qualioPullRequest(repo, p, [{ id: 'sharding', message: p.title, body: 'Qualio splits the E2E tests across jobs by their past durations.', files: [{ path: p.path, content: p.content, baseSha256: p.baseSha256 }] }]);
+  if (built.failed) return { failed: built.failed };
+  if (built.conflicts.length) {
+    console.log(`Qualio's change to ${p.path} no longer fits (the file changed since): it proposes again from the new one if it's still worth it.`);
+    return { sharding: { conflict: true } };
+  }
+  if (built.empty) return { sharding: {} };
+  if (built.qualioPr) console.log(`Qualio pull request #${built.qualioPr.number} (${p.qualioBranch} → ${p.branch}): ${p.title}.`);
+  return { sharding: { qualioPr: built.qualioPr ? { number: built.qualioPr.number, url: built.qualioPr.url, state: 'open' } : null } };
+}
+
 /** Sends one outbox item. Returns the GitHub call that failed, if one did, and the report comment's id. */
 async function deliver(item) {
   const repo = `/repos/${process.env.GITHUB_REPOSITORY}`;
   if (item.kind === 'REPORT') return deliverReport(repo, item);
   if (item.kind === 'TEST_CHANGES') return deliverTestChanges(repo, item);
+  if (item.kind === 'SHARDING_CHANGE') return deliverShardingChange(repo, item);
   return { failed: await deliverOne(repo, item) };
 }
 
@@ -815,14 +843,14 @@ async function sendBatch(items) {
   let sent = 0;
   let denied = false;
   for (const item of items) {
-    const { failed, commentId, changes } = await deliver(item);
+    const { failed, commentId, changes, sharding } = await deliver(item);
     // Missing token permissions, rate limits and GitHub outages are retried by the next job.
     if (failed && (failed.status === 0 || failed.status === 403 || failed.status === 429 || failed.status >= 500)) {
       denied ||= failed.status === 403;
       console.log(`Not sent yet (${item.kind}, GitHub ${failed.status || 'unreachable'}): ${failed.message}`);
       continue;
     }
-    await call(`/v1/pr/outbox/${item.id}/ack`, { error: failed ? `GitHub ${failed.status}: ${failed.message}` : null, ...(commentId && { commentId }), ...(changes && !failed && { changes }) });
+    await call(`/v1/pr/outbox/${item.id}/ack`, { error: failed ? `GitHub ${failed.status}: ${failed.message}` : null, ...(commentId && { commentId }), ...(changes && !failed && { changes }), ...(sharding && !failed && { sharding }) });
     if (!failed) sent += 1;
     else console.log(`GitHub refused an update (${item.kind}, ${failed.status}): ${failed.message}`);
   }
@@ -845,7 +873,8 @@ async function outbox(waitMinutes = '0') {
     // report: this action edits Qualio's one report comment in place and reacts to commands.
     // changes: this action offers Qualio's changes to the tests (suggestions, the Qualio pull request).
     // lease: a sharded run's jobs end together; each item goes out from one of them.
-    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true, ...(process.env.QUALIO_SHARDED === 'true' && { lease: true }) });
+    // sharding: this action opens Qualio's pull request that changes tests.shards.max.
+    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true, sharding: true, ...(process.env.QUALIO_SHARDED === 'true' && { lease: true }) });
     if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
     const batch = await sendBatch(body.items);
     sent += batch.sent;
