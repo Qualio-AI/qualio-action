@@ -108,7 +108,22 @@ export function ciContext(env: NodeJS.ProcessEnv = process.env) {
       env.GITHUB_SERVER_URL && env.GITHUB_REPOSITORY && env.GITHUB_RUN_ID
         ? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`
         : null,
+    shard: shardContext(env),
   };
+}
+
+/**
+ * This job's shard when the Qualio action runs the tests across several jobs (QUALIO_SHARD_INDEX of
+ * QUALIO_SHARD_TOTAL, from the shard plan QUALIO_SHARD_PLAN): the jobs report into one run.
+ */
+export function shardContext(env: NodeJS.ProcessEnv = process.env, now = Date.now()) {
+  const index = Number(env.QUALIO_SHARD_INDEX);
+  const total = Number(env.QUALIO_SHARD_TOTAL);
+  if (!Number.isInteger(index) || !Number.isInteger(total) || total < 2 || index < 1 || index > total) return null;
+  // The job's setup time (checkout, install, the app) until the tests start: the planner weighs it.
+  const startedAt = Number(env.QUALIO_JOB_STARTED_AT) * 1000;
+  const setupMs = startedAt > 0 && now >= startedAt ? Math.round(now - startedAt) : null;
+  return { index, total, planId: env.QUALIO_SHARD_PLAN || null, setupMs };
 }
 
 export default class QualioReporter implements Reporter {
@@ -118,6 +133,7 @@ export default class QualioReporter implements Reporter {
   private readonly runFile = process.env.QUALIO_RUN_FILE ?? '';
   private rootDir = process.cwd();
   private runId: Promise<string | null> | null = null;
+  private shard: number | null = null;
   private readonly results = new Map<string, ReportedResult>();
   private readonly uploads: Upload[] = [];
   private log = '';
@@ -138,8 +154,12 @@ export default class QualioReporter implements Reporter {
       return;
     }
     this.append(`Running ${suite.allTests().length} tests with ${config.workers} worker(s)`);
+    const context = ciContext();
+    this.shard = context.shard?.index ?? null;
+    const tests = suite.allTests();
+    const shard = context.shard && { ...context.shard, tests: tests.length, files: new Set(tests.map((t) => t.location.file)).size };
     this.runId = readBundle(this.rootDir)
-      .then((bundle) => this.call<{ runId: string }>('POST', '/v1/runs', { ...ciContext(), bundle }))
+      .then((bundle) => this.call<{ runId: string }>('POST', '/v1/runs', { ...context, shard, bundle }))
       .then((r) => r.runId)
       .catch((error) => {
         console.warn(`[qualio] Could not register the run: ${(error as Error).message}`);
@@ -197,20 +217,28 @@ export default class QualioReporter implements Reporter {
     try {
       // Artifacts are evidence, not the report: if they can't be stored, the results still go to Qualio.
       await this.uploadArtifacts(runId).catch((error) => console.warn(`[qualio] Could not upload artifacts: ${(error as Error).message}`));
-      const response = await this.call<{ url: string; status: string }>('POST', `/v1/runs/${runId}/results`, {
+      const response = await this.call<{ url: string; status: string; pendingShards?: number[] }>('POST', `/v1/runs/${runId}/results`, {
         status: result.status,
         durationMs: Math.round(result.duration),
         results: [...this.results.values()],
         log: this.log,
+        ...(this.shard && { shard: this.shard }),
       });
       console.log(`[qualio] Results reported: ${response.url}`);
       let heal: string | null = null;
-      if (response.status === 'FAILED') {
+      if (response.status === 'RUNNING') {
+        // A sharded run: Qualio records it (and heals it) once the other shards have reported.
+        console.log(`[qualio] Waiting for shard${response.pendingShards?.length === 1 ? '' : 's'} ${(response.pendingShards ?? []).join(', ')} to report: the run is recorded once all have.`);
+        // This shard's own tests failed: the action waits for the run's heal.
+        if (result.status !== 'passed') heal = 'queued';
+      } else if (response.status === 'FAILED') {
         // Hand the failures to Qualio's self-healing (it decides whether they're healable).
         heal = (await this.call<{ status: string }>('POST', '/v1/tests/heal', { runId })).status;
         if (heal === 'queued') console.log('[qualio] Self-healing requested: Qualio will diagnose the failures and fix the tests if they are healable.');
       }
-      await this.writeRunFile({ runId, status: response.status, url: response.url, heal });
+      // A shard waiting for the others writes its own outcome, so the action knows whether to wait for the heal.
+      const status = response.status === 'RUNNING' ? (result.status === 'passed' ? 'PASSED' : 'FAILED') : response.status;
+      await this.writeRunFile({ runId, status, url: response.url, heal });
     } catch (error) {
       console.warn(`[qualio] Could not report results: ${(error as Error).message}`);
     }
