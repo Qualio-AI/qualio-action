@@ -7,6 +7,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { freePort } from './free-port.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 let child;
@@ -15,10 +16,10 @@ after(() => child?.kill());
 /** Starts the stub in a mode and runs the outbox step against it. */
 async function runOutbox(mode) {
   child?.kill();
-  const port = 5300 + Math.floor(Math.random() * 300);
+  const port = await freePort();
   child = spawn(process.execPath, [path.join(root, 'test/stub-qualio.mjs'), String(port), mode], { stdio: 'ignore' });
   const url = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 300; i++) {
     try {
       await fetch(`${url}/__calls`);
       break;

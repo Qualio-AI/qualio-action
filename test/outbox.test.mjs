@@ -7,16 +7,17 @@ import { execFileSync, spawn } from 'node:child_process';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { freePort } from './free-port.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const stubs = [];
 
 async function stub(mode) {
-  const port = 4900 + Math.floor(Math.random() * 300);
+  const port = await freePort();
   const child = spawn(process.execPath, [path.join(root, 'test/stub-qualio.mjs'), String(port), mode], { stdio: 'ignore' });
   child.unref();
   stubs.push(child);
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 300; i++) {
     try {
       await fetch(`http://127.0.0.1:${port}/__calls`);
       break;

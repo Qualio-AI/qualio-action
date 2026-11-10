@@ -8,13 +8,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { freePort } from './free-port.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const port = 4900 + Math.floor(Math.random() * 90);
+let port;
 let repo;
 let stub;
 
 before(async () => {
+  port = await freePort();
   repo = await mkdtemp(path.join(os.tmpdir(), 'qualio-config-'));
   await mkdir(path.join(repo, 'docs/qualio/skills'), { recursive: true });
   await writeFile(path.join(repo, 'docs/qualio/domain.md'), '# Classes\n- At most 30 students\n');
@@ -23,7 +25,7 @@ before(async () => {
   await mkdir(path.join(repo, '.qualio'));
   await writeFile(path.join(repo, '.qualio/config.yml'), 'version: 1\nspecs:\n  approval: automatic\n');
   stub = spawn(process.execPath, [path.join(root, 'test/stub-qualio.mjs'), String(port)], { stdio: 'ignore' });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 300; i++) {
     try {
       await fetch(`http://127.0.0.1:${port}/__calls`);
       return;
