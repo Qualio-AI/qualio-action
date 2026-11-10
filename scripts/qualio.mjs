@@ -844,7 +844,8 @@ async function outbox(waitMinutes = '0') {
   for (;;) {
     // report: this action edits Qualio's one report comment in place and reacts to commands.
     // changes: this action offers Qualio's changes to the tests (suggestions, the Qualio pull request).
-    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true });
+    // lease: a sharded run's jobs end together; each item goes out from one of them.
+    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true, ...(process.env.QUALIO_SHARDED === 'true' && { lease: true }) });
     if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
     const batch = await sendBatch(body.items);
     sent += batch.sent;
@@ -970,11 +971,110 @@ async function config(branch) {
   await output({ scope: String(body.scope).toLowerCase() });
 }
 
+// ── Auto-sharding (specs/auto-sharding.md) ───────────────────────────────────────────────────────
+
+/**
+ * The test files Playwright would run in the tests folder, relative to it, with their test counts (each
+ * project's copy counts): `playwright test --list` with the team's own config, so testDir, testMatch
+ * and projects are Playwright's to decide. Null when listing fails.
+ */
+async function listTests(dir) {
+  let report;
+  if (process.env.QUALIO_PLAYWRIGHT_LIST) report = JSON.parse(await readFile(process.env.QUALIO_PLAYWRIGHT_LIST, 'utf8'));
+  else {
+    const out = await new Promise((resolve) => {
+      const child = spawn('npx', ['playwright', 'test', '--list', '--reporter=json'], { cwd: dir, env: { ...process.env, QUALIO_REPORTER: '' }, stdio: ['ignore', 'pipe', 'inherit'] });
+      let text = '';
+      child.stdout.on('data', (d) => (text += d));
+      child.on('error', () => resolve(null));
+      child.on('exit', (code) => resolve(code === 0 ? text : null));
+    });
+    if (out === null) return null;
+    try {
+      report = JSON.parse(out);
+    } catch {
+      return null;
+    }
+  }
+  const rootDir = report.config?.rootDir ?? dir;
+  const counts = new Map();
+  const walk = (suites) => {
+    for (const suite of suites ?? []) {
+      if (suite.file) {
+        const rel = path.relative(dir, path.resolve(rootDir, suite.file)).split(path.sep).join('/');
+        const tests = (suite.specs ?? []).reduce((n, spec) => n + (spec.tests?.length ?? 1), 0);
+        counts.set(rel, (counts.get(rel) ?? 0) + tests);
+      }
+      walk(suite.suites);
+    }
+  };
+  walk(report.suites);
+  return [...counts].map(([file, tests]) => ({ path: file, tests }));
+}
+
+/**
+ * The plan job: how many jobs run this workflow run's tests and which files each runs, from Qualio
+ * (by the tests' past durations, at most qualio.yml's tests.shards.max). Never fails the job: without
+ * a plan, one job runs every test. Outputs run, shards (a JSON list for the matrix) and plan-id.
+ */
+async function plan(branch, dir) {
+  const single = (why) => {
+    if (why) console.log(`::notice title=Qualio::${why} One job runs every test.`);
+    return output({ run: 'true', shards: '[1]', 'plan-id': '' });
+  };
+  const files = await listTests(dir);
+  if (!files) return single('Playwright could not list the tests, so they are not split across jobs.');
+  if (files.length < 2) return single();
+  const { GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT } = process.env;
+  if (!GITHUB_RUN_ID) return single();
+  const { status, body } = await call('/v1/tests/plan', {
+    branch,
+    commitSha: process.env.QUALIO_COMMIT_SHA || process.env.GITHUB_SHA || 'local',
+    ghRunId: GITHUB_RUN_ID,
+    ghRunAttempt: Number(GITHUB_RUN_ATTEMPT || 1),
+    files,
+  });
+  // An older Qualio has no plans.
+  if (status === 404) return single();
+  if (status !== 200) return single(`Qualio could not plan the jobs (${status}): ${body.error ?? 'unknown error'}.`);
+  const minutes = (ms) => `${Math.max(1, Math.round(ms / 60_000))} min`;
+  if (body.shards.length > 1)
+    console.log(`Qualio splits ${plural(files.length, 'test file')} across ${body.shards.length} jobs (about ${minutes(body.predictedMs)}, instead of ${minutes(body.singleJobMs)} in one job).`);
+  else console.log(`One job runs the ${plural(files.length, 'test file')}: more jobs wouldn't make the run faster.`);
+  await output({ run: 'true', shards: JSON.stringify(body.shards), 'plan-id': body.shards.length > 1 ? body.planId : '' });
+}
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * A shard job: its files from the run's plan, written as Playwright filters (one per line, each the
+ * file's whole absolute path, so login.spec.ts never also picks admin-login.spec.ts) to argsFile.
+ * Outputs total (the run's shard count). One shard of one runs everything.
+ */
+async function shard(planId, index, dir, argsFile) {
+  await writeFile(argsFile, '');
+  if (!planId) return output({ total: '1' });
+  const { status, body } = await call('/v1/tests/plan/shard', { planId, index: Number(index) });
+  // Running every test here would run them twice: the job fails instead.
+  if (status !== 200) throw new Error(`Qualio could not say which tests shard ${index} runs (${status}): ${body.error ?? 'unknown error'}`);
+  if (body.total > 1) {
+    const abs = path.resolve(dir);
+    await writeFile(argsFile, body.files.map((f) => `^${escapeRegExp(path.join(abs, f))}$`).join('\n') + '\n');
+    console.log(`Shard ${body.index} of ${body.total}: ${plural(body.files.length, 'test file')}.`);
+  }
+  await output({ total: String(body.total) });
+}
+
 /** This job failed before the reporter sent results: the run shows as errored in Qualio right away. */
 async function errored(conclusion) {
   const { GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_SERVER_URL, GITHUB_REPOSITORY } = process.env;
   if (!GITHUB_RUN_ID || !GITHUB_REPOSITORY) return;
+  const index = Number(process.env.QUALIO_SHARD_INDEX);
+  const total = Number(process.env.QUALIO_SHARD_TOTAL);
   const { status, body } = await call('/v1/runs/errored', {
+    // A sharded run's job: only this shard ended without results.
+    // (Its shard count is unknown when the job failed before reading its plan.)
+    ...(index >= 1 && (total > 1 || process.env.QUALIO_SHARD_PLAN) && { shard: { index, ...(total > 1 && { total }), planId: process.env.QUALIO_SHARD_PLAN || null } }),
     ghRunId: GITHUB_RUN_ID,
     runAttempt: Number(GITHUB_RUN_ATTEMPT || 1),
     branch: process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME,
@@ -987,9 +1087,9 @@ async function errored(conclusion) {
 
 const [command, ...args] = process.argv.slice(2);
 // `setup`: the name of the map step before phase 54.
-const commands = { map, setup: map, prepare, apply, wait, look, sync, config, outbox, errored, comment };
+const commands = { map, setup: map, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use map, prepare, apply, wait, look, sync, config, outbox, errored or comment.`);
+  console.error(`Unknown command "${command}". Use map, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {

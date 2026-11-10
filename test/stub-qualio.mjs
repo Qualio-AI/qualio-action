@@ -15,7 +15,8 @@
 //     the diff, one adds a file); "move": the project's tests are still in Qualio, so a job without the
 //     tests folder gets the whole folder; "live": the heal looks at the running app through the job's
 //     browser host (live diagnosis): five calls, two fine and three the host must refuse, then the heal
-//     ends not_healable; GET /__browser lists the host's answers)
+//     ends not_healable; GET /__browser lists the host's answers; "shards": the plan splits the tests
+//     over two jobs)
 import { createHash } from 'node:crypto';
 import http from 'node:http';
 
@@ -45,6 +46,8 @@ const outbox =
       ]
     : [];
 const calls = [];
+// The shards a plan job's plan gave (the Test workflow's shard jobs start their own stub: test/shard-fixture's split).
+const plans = { p1: mode === 'shards' ? [['tests/one.spec.ts'], ['tests/two.spec.ts']] : [['tests/a.spec.ts', 'tests/c.spec.ts'], ['tests/b.spec.ts']] };
 let healPolls = 0;
 // "live": what the Runner asks the job's browser to show, and what the host answered.
 const LIVE_ROLES = [{ role: 'Admin', usernameEnv: 'E2E_ADMIN_USERNAME', passwordEnv: 'E2E_ADMIN_PASSWORD' }];
@@ -190,7 +193,7 @@ http
     if (req.url === '/v1/map/c1/status') return res.end(JSON.stringify(mapped ? { state: 'done', message: 'Mapped 1 page.' } : { state: 'map', message: 'Mapping the application…' }));
     // The tests folder: test/heal-fixture (its test fails until the heal); "empty" names one that doesn't exist.
     if (req.url === '/v1/tests/prepare')
-      return res.end(JSON.stringify({ testsDir: mode === 'empty' ? 'e2e-none-yet' : mode === 'move' ? 'e2e-moving' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review' }));
+      return res.end(JSON.stringify({ testsDir: mode === 'empty' ? 'e2e-none-yet' : mode === 'move' ? 'e2e-moving' : mode === 'shards' ? 'test/shard-fixture' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review' }));
     if (req.url === '/v1/tests/snapshot') {
       // The contents travel only when asked for (here: always, the first time).
       if (body.files.some((f) => f.content === undefined) && !body.files.some((f) => f.content !== undefined))
@@ -269,6 +272,18 @@ http
       return res.end(JSON.stringify({ ok: true }));
     }
     if (req.url === '/v1/runs/errored') return res.end(JSON.stringify({ ok: true }));
+    // Auto-sharding: "shards" splits the listed files over two jobs (the longest list first); without it, one job.
+    if (req.url === '/v1/tests/plan') {
+      const files = body.files.map((f) => f.path).sort();
+      if (mode !== 'shards') return res.end(JSON.stringify({ planId: 'p1', shards: [1], reason: 'gain', predictedMs: 60_000, singleJobMs: 60_000 }));
+      plans.p1 = [files.filter((_, i) => i % 2 === 0), files.filter((_, i) => i % 2 === 1)];
+      return res.end(JSON.stringify({ planId: 'p1', shards: [1, 2], reason: 'gain', predictedMs: 4 * 60_000, singleJobMs: 7 * 60_000 }));
+    }
+    if (req.url === '/v1/tests/plan/shard') {
+      const shards = plans[body.planId];
+      if (!shards?.[body.index - 1]) return res.writeHead(404).end(JSON.stringify({ error: 'No such shard plan' }));
+      return res.end(JSON.stringify({ index: body.index, total: shards.length, files: shards[body.index - 1], plannedMs: 60_000 }));
+    }
     res.writeHead(404).end(JSON.stringify({ error: 'Not found' }));
   })
   .listen(port, () => console.log(`Stub Qualio API on http://localhost:${port}`));

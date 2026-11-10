@@ -91,6 +91,69 @@ jobs:
           routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r.startsWith('/v1/tests/') || r === '/v1/map/start').join(' ')")
           test "$routes" = "/v1/map/start /v1/tests/prepare /v1/tests/snapshot /v1/tests/snapshot /v1/tests/heal/status /v1/tests/heal/status /v1/tests/changes"
 
+  # Auto-sharding (specs/auto-sharding.md): the plan job lists test/shard-fixture's two files with
+  # Playwright and the stub splits them over two jobs; each job runs its one file and nothing else.
+  shards-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      plan-id: ${{ steps.plan.outputs.plan-id }}
+      run: ${{ steps.plan.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API
+        run: |
+          node test/stub-qualio.mjs 4555 shards &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: plan
+        uses: ./
+        with:
+          command: plan
+          api-key: qk_stub
+          api-url: http://localhost:4555
+      - name: Two jobs, from Playwright's own list
+        env:
+          SHARDS: ${{ steps.plan.outputs.shards }}
+          PLAN: ${{ steps.plan.outputs.plan-id }}
+        run: |
+          test "$SHARDS" = "[1,2]"
+          test "$PLAN" = p1
+          files=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).find((c) => c.route === '/v1/tests/plan').body.files.map((f) => f.path).join(' ')")
+          test "$files" = "tests/one.spec.ts tests/two.spec.ts"
+
+  shards:
+    needs: shards-plan
+    if: needs.shards-plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.shards-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stub Qualio API
+        run: |
+          node test/stub-qualio.mjs 4555 shards &
+          for _ in $(seq 1 20); do nc -z localhost 4555 && break; sleep 0.5; done
+      - id: action
+        uses: ./
+        with:
+          api-key: qk_stub
+          api-url: http://localhost:4555
+          shard: ${{ matrix.shard }}
+          shard-plan: ${{ needs.shards-plan.outputs.plan-id }}
+      - name: This shard ran its one file
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          test "$OUTCOME" = success
+          mine=$([ "$SHARD" = 1 ] && echo one || echo two)
+          other=$([ "$SHARD" = 1 ] && echo two || echo one)
+          grep -q "shard file $mine runs once" "$RUNNER_TEMP/qualio-playwright.log"
+          ! grep -q "shard file $other runs once" "$RUNNER_TEMP/qualio-playwright.log"
+          grep -q "1 passed" "$RUNNER_TEMP/qualio-playwright.log"
+
   # A project with no map yet: the job maps the app with Qualio's mapper first (no tests are generated),
   # then runs the repository's tests as usual.
   map:
