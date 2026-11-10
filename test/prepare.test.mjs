@@ -111,8 +111,14 @@ test('binary files travel as a description, and Qualio never writes over them', 
   );
   assert.match(sent.find((f) => f.path === 'fixtures/logo.png').content, /^\[qualio:binary\] PNG image, 12 bytes, sha256 [0-9a-f]{64}\n/);
   assert.equal(sent.find((f) => f.path === 'fixtures/notes.txt').content, 'plain text');
-  // The hash is the description's: what Qualio stores is what it was sent.
+  // The hash is the description's: what Qualio stores is what it was sent; the bytes' hash goes with it.
   assert.equal(sent.find((f) => f.path === 'fixtures/students.xlsx').sha256, createHash('sha256').update(xlsx).digest('hex'));
+  assert.equal(sent.find((f) => f.path === 'fixtures/students.xlsx').bytesSha256, createHash('sha256').update(workbook).digest('hex'));
+  assert.equal(sent.find((f) => f.path === 'fixtures/notes.txt').bytesSha256, undefined);
+  assert.equal(calls.find((c) => c.route === '/v1/tests/snapshot').body.binary, true);
+  // A binary file Qualio adds (base64) is written as its bytes; what this action couldn't get is a warning.
+  assert.deepEqual(await readFile(path.join(tests, 'fixtures/attached.xlsx')), Buffer.from([0x50, 0x4b, 3, 4, 0, 0xff]));
+  assert.match(log, /::warning title=Qualio::Qualio has the test file fixtures\/other\.pdf/);
 
   assert.match(log, /fixtures\/students\.xlsx is a binary file: Qualio's change to it was not applied/);
   assert.deepEqual(await readFile(path.join(tests, 'fixtures/students.xlsx')), workbook);

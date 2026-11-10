@@ -102,3 +102,19 @@ test("tells Qualio when GitHub won't let the job open the Qualio pull request, w
   assert.match(out, /::warning title=Qualio::Qualio pushed its changes to qualio\/pr-7 but GitHub didn't let it open the pull request/);
   assert.match(out, new RegExp(`${url.replace(/[.]/g, '\\.')}/docs/getting-started#allow-pull-requests`));
 });
+
+test('commits a binary test file a person attached as a blob, never as a suggestion', async () => {
+  const { url } = await runOutbox('changes-binary');
+  const json = async (route) => (await fetch(`${url}${route}`)).json();
+  const [github, outbox, calls] = await Promise.all([json('/__github'), json('/__outbox'), json('/__calls')]);
+  assert.equal(calls.find((c) => c.route === '/v1/pr/outbox').body.binary, true);
+  assert.equal(github.reviews.length, 0);
+  // The workbook's bytes go up as a base64 blob; the tree takes the blob's sha, the test file its text.
+  assert.deepEqual(github.blobs, [{ content: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 1, 2, 3, 0xff, 0xfe]).toString('base64'), encoding: 'base64' }]);
+  assert.deepEqual(github.trees[0].tree, [
+    { path: 'e2e/tests/import.spec.ts', mode: '100644', type: 'blob', content: "test('imports', () => {});\n" },
+    { path: 'e2e/fixtures/students.xlsx', mode: '100644', type: 'blob', sha: 'blob1' },
+  ]);
+  assert.deepEqual(outbox.find((i) => i.id === 'c1').ack.changes.delivered.map((d) => [d.id, d.via]), [['import-tests', 'qualio_pr']]);
+});
+

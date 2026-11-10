@@ -35,7 +35,7 @@ const outbox =
     ? [{ id: 'r1', kind: 'REPORT', prNumber: 7, sha: null, payload: { prNumber: 7, body: REPORT, commentId: 404 } }]
     : mode === 'sharding'
     ? [{ id: 's1', kind: 'SHARDING_CHANGE', prNumber: null, sha: null, payload: null }]
-    : mode === 'changes' || mode === 'changes-refused'
+    : mode === 'changes' || mode === 'changes-refused' || mode === 'changes-binary'
     ? [{ id: 'c1', kind: 'TEST_CHANGES', prNumber: 7, sha: null, payload: null }]
     : process.argv[3] === 'outbox'
     ? [
@@ -102,7 +102,28 @@ const testChanges = () => ({
     { id: 'new-tests', kind: 'tests', featureKey: 'SCH-9', title: 'SCH-9: E2E tests', message: 'test(SCH-9): add E2E tests', body: 'New', suggest: false, via: null, files: [{ path: 'tests/sch-9.spec.ts', content: "test('adds', () => {});\n", baseSha256: null }] },
   ],
 });
-const github = { reviews: [], trees: [], commits: [], refs: [], pulls: [] };
+// "changes-binary": the tests and the test file a person attached (an Excel workbook), committed as it is.
+const WORKBOOK = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 1, 2, 3, 0xff, 0xfe]);
+const binaryChanges = () => ({
+  ...testChanges(),
+  changes: [
+    {
+      id: 'import-tests',
+      kind: 'tests',
+      featureKey: 'SCH-30',
+      title: 'SCH-30: E2E tests',
+      message: 'test(SCH-30): add E2E tests',
+      body: 'New, with the attached file',
+      suggest: false,
+      via: null,
+      files: [
+        { path: 'tests/import.spec.ts', content: "test('imports', () => {});\n", baseSha256: null },
+        { path: 'fixtures/students.xlsx', content: WORKBOOK.toString('base64'), encoding: 'base64', baseSha256: null },
+      ],
+    },
+  ],
+});
+const github = { reviews: [], trees: [], commits: [], refs: [], pulls: [], blobs: [] };
 // "sharding": Qualio proposes tests.shards.max: 10 in the config file (specs/auto-sharding.md).
 const shardingChange = () => ({
   qualioBranch: 'qualio/sharding',
@@ -151,7 +172,7 @@ http
     calls.push({ route: req.url, method: req.method, auth: req.headers.authorization === 'Bearer qk_stub', body });
     res.setHeader('content-type', 'application/json');
     // GitHub's REST API, as the outbox uses it (any token).
-    if (req.url.startsWith('/repos/acme/app/') && (mode === 'changes' || mode === 'changes-refused' || mode === 'sharding')) {
+    if (req.url.startsWith('/repos/acme/app/') && (mode === 'changes' || mode === 'changes-refused' || mode === 'changes-binary' || mode === 'sharding')) {
       const route = req.url.slice('/repos/acme/app'.length);
       if (req.method === 'GET' && route === '/pulls/7') return res.end(JSON.stringify({ number: 7, state: 'open', head: { sha: 'head7' } }));
       if (req.method === 'GET' && route.startsWith('/pulls/7/files'))
@@ -169,6 +190,10 @@ http
       }
       if (req.method === 'GET' && route.startsWith('/git/ref/heads/')) return res.end(JSON.stringify({ object: { sha: 'head7' } }));
       if (req.method === 'GET' && route === '/git/commits/head7') return res.end(JSON.stringify({ sha: 'head7', tree: { sha: 'tree7' } }));
+      if (req.method === 'POST' && route === '/git/blobs') {
+        github.blobs.push(body);
+        return res.writeHead(201).end(JSON.stringify({ sha: `blob${github.blobs.length}` }));
+      }
       if (req.method === 'POST' && route === '/git/trees') {
         github.trees.push(body);
         return res.writeHead(201).end(JSON.stringify({ sha: `tree${github.trees.length}` }));
@@ -214,8 +239,17 @@ http
       if (body.files.some((f) => f.content === undefined) && !body.files.some((f) => f.content !== undefined))
         return res.end(JSON.stringify({ state: 'contents', missing: body.files.map((f) => f.sha256) }));
       // "binary": Qualio's answer (wrongly) changes a binary file of the folder, which the action refuses to write.
-      const files = mode === 'binary' ? [{ path: 'fixtures/students.xlsx', content: 'not a workbook' }, { path: 'fixtures/notes.txt', content: 'changed' }] : [];
-      return res.end(JSON.stringify({ state: 'stored', snapshotId: 'snap1', committed: 0, outdated: 0, files, revisionIds: files.length ? ['b1'] : [], pending: [] }));
+      // An attached test file Qualio adds (base64) is written as its bytes.
+      const files =
+        mode === 'binary'
+          ? [
+              { path: 'fixtures/students.xlsx', content: 'not a workbook' },
+              { path: 'fixtures/notes.txt', content: 'changed' },
+              { path: 'fixtures/attached.xlsx', content: Buffer.from([0x50, 0x4b, 3, 4, 0, 0xff]).toString('base64'), encoding: 'base64' },
+            ]
+          : [];
+      const notices = mode === 'binary' ? ['Qualio has the test file fixtures/other.pdf for this branch, but this version of the Qualio action can\'t write binary files.'] : [];
+      return res.end(JSON.stringify({ state: 'stored', snapshotId: 'snap1', committed: 0, outdated: 0, files, notices, revisionIds: files.length ? ['b1'] : [], pending: [] }));
     }
     if (req.url === '/v1/tests/changes') {
       if (body.whole)
@@ -283,7 +317,7 @@ http
         JSON.stringify({
           items: outbox
             .filter((i) => !i.sent && (i.kind !== 'SHARDING_CHANGE' || body.sharding))
-            .map((i) => (i.kind === 'TEST_CHANGES' ? { ...i, payload: body.changes ? testChanges() : null } : i.kind === 'SHARDING_CHANGE' ? { ...i, payload: shardingChange() } : i)),
+            .map((i) => (i.kind === 'TEST_CHANGES' ? { ...i, payload: body.changes ? (mode === 'changes-binary' ? (body.binary ? binaryChanges() : null) : testChanges()) : null } : i.kind === 'SHARDING_CHANGE' ? { ...i, payload: shardingChange() } : i)),
           waiting: false,
         }),
       );

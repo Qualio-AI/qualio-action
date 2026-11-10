@@ -103,7 +103,12 @@ async function testFiles(dir) {
         }
         // A binary file (a committed .xlsx, a PDF) travels as a text description: never as mangled UTF-8.
         const bytes = await readFile(childAbs);
-        out.push(isBinary(bytes) ? { path: childRel, content: describeBinary(childRel, bytes), binary: true } : { path: childRel, content: bytes.toString('utf8') });
+        // Its bytes' hash goes with it, so Qualio recognises a binary file it added (a test file a person attached).
+        out.push(
+          isBinary(bytes)
+            ? { path: childRel, content: describeBinary(childRel, bytes), bytesSha256: sha256(bytes) }
+            : { path: childRel, content: bytes.toString('utf8') },
+        );
       }
       if (out.length > MAX_SNAPSHOT_FILES) throw new Error(`The tests folder has over ${MAX_SNAPSHOT_FILES} files. Point qualio.yml's tests.path at the E2E tests only.`);
     }
@@ -112,22 +117,32 @@ async function testFiles(dir) {
   return out;
 }
 
-/** Writes files on top of a folder: null content deletes the file. Binary files are never Qualio's to change. */
+/**
+ * Writes files on top of a folder: null content deletes the file; `encoding: 'base64'` is a binary file (a test
+ * file a person attached), written as its bytes. A binary file of the folder is never changed by text, and never
+ * deleted.
+ */
 async function applyFiles(dir, files) {
   for (const file of files) {
     const target = safePath(dir, file.path);
+    const binary = file.encoding === 'base64' && file.content !== null;
     const current = await readFile(target).catch(() => null);
-    if (current && isBinary(current)) {
+    if (current && isBinary(current) && !binary) {
       console.log(`::warning title=Qualio::${file.path} is a binary file: Qualio's change to it was not applied.`);
       continue;
     }
     if (file.content === null) await rm(target, { force: true });
     else {
       await mkdir(path.dirname(target), { recursive: true });
-      await writeFile(target, file.content);
+      await writeFile(target, binary ? Buffer.from(file.content, 'base64') : file.content);
     }
   }
 }
+
+/** What Qualio says this job couldn't get (e.g. a binary test file for an older action). */
+const printNotices = (notices) => {
+  for (const notice of notices ?? []) console.log(`::warning title=Qualio::${notice}`);
+};
 
 /** The run manifest the reporter sends with the run: which of Qualio's changes this job applied. */
 async function writeManifest(bundleId, revisionIds) {
@@ -343,13 +358,18 @@ async function prepare(branch, input = '') {
     prNumber: await eventPrNumber(),
     headSha: process.env.QUALIO_COMMIT_SHA || process.env.GITHUB_SHA || '0000000',
     testsDir: folder.rel,
-    files: files.map((f) => ({ path: f.path, sha256: sha256(f.content) })),
+    files: files.map((f) => ({ path: f.path, sha256: sha256(f.content), ...(f.bytesSha256 && { bytesSha256: f.bytesSha256 }) })),
+    // This action writes binary files Qualio adds (base64 entries).
+    binary: true,
   };
   let { status, body } = await call('/v1/tests/snapshot', request);
   if (status === 200 && body.state === 'contents') {
     // Only the contents Qualio doesn't have yet travel.
     const missing = new Set(body.missing);
-    ({ status, body } = await call('/v1/tests/snapshot', { ...request, files: files.map((f) => ({ path: f.path, sha256: sha256(f.content), ...(missing.has(sha256(f.content)) && { content: f.content }) })) }));
+    ({ status, body } = await call('/v1/tests/snapshot', {
+      ...request,
+      files: files.map((f) => ({ path: f.path, sha256: sha256(f.content), ...(f.bytesSha256 && { bytesSha256: f.bytesSha256 }), ...(missing.has(sha256(f.content)) && { content: f.content }) })),
+    }));
   }
   if (status !== 200 || body.state !== 'stored') throw new Error(`Sending the tests folder to Qualio failed (${status}): ${body.error ?? 'unknown error'}`);
   if (body.committed) console.log(`Qualio sees ${plural(body.committed, 'of its changes')} committed on ${branch}.`);
@@ -359,6 +379,7 @@ async function prepare(branch, input = '') {
     console.log(`::notice title=Qualio::There are no tests in '${folder.rel}' yet. Qualio writes tests for the pull requests that name an approved ticket, starting the folder; until then this job has nothing to run.`);
     return output({ run: 'false', dir });
   }
+  printNotices(body.notices);
   if (body.files.length) {
     await applyFiles(dir, body.files);
     console.log(`Applied ${plural(body.revisionIds.length, 'change')} Qualio offers on ${branch} (${plural(body.files.length, 'file')}): they run here before they're committed.`);
@@ -379,8 +400,9 @@ function missingFolder(rel) {
 
 /** After a heal: writes the branch's changes (now with the fix) on top of the tests folder for the re-run. */
 async function apply(dir, branch, mode = 'repo') {
-  const { status, body } = await call('/v1/tests/changes', { branch, ...(mode === 'move' && { whole: true }) });
+  const { status, body } = await call('/v1/tests/changes', { branch, binary: true, ...(mode === 'move' && { whole: true }) });
   if (status !== 200) throw new Error(`Getting Qualio's fix failed (${status}): ${body.error ?? 'unknown error'}`);
+  printNotices(body.notices);
   if (body.replace) await writeFiles(dir, body.files);
   else await applyFiles(dir, body.files);
   await writeManifest(body.replace ? 'move' : 'repo', body.revisionIds);
@@ -558,18 +580,21 @@ async function deliverReport(repo, item) {
 const encodePath = (p) => p.split('/').map(encodeURIComponent).join('/');
 const ok = (r) => r.status >= 200 && r.status < 300;
 
-/** A file's contents at a commit, or null when it doesn't exist there. Throws on other errors. */
+/** A file's bytes at a commit, or null when it doesn't exist there. Throws on other errors. */
 async function fileAt(repo, file, ref) {
   const r = await github('GET', `${repo}/contents/${encodePath(file)}?ref=${encodeURIComponent(ref)}`);
   if (r.status === 404) return null;
   if (!ok(r)) throw Object.assign(new Error(`GitHub ${r.status}: ${r.message}`), { status: r.status });
   if (Array.isArray(r.data) || r.data?.type !== 'file') return null;
-  if (r.data.encoding === 'base64') return Buffer.from(r.data.content ?? '', 'base64').toString('utf8');
+  if (r.data.encoding === 'base64') return Buffer.from(r.data.content ?? '', 'base64');
   // Over 1 MB GitHub sends no content: read the blob.
   const blob = await github('GET', `${repo}/git/blobs/${r.data.sha}`);
   if (!ok(blob)) throw Object.assign(new Error(`GitHub ${blob.status}: ${blob.message}`), { status: blob.status });
-  return Buffer.from(blob.data.content ?? '', 'base64').toString('utf8');
+  return Buffer.from(blob.data.content ?? '', 'base64');
 }
+
+/** The hash that identifies what a change file writes: of its bytes (base64 entries) or its text. */
+const changeHash = (f) => (f.content === null ? null : f.encoding === 'base64' ? sha256(Buffer.from(f.content, 'base64')) : sha256(f.content));
 
 /** The lines each file of a pull request's diff shows (right side), by path. */
 async function pullRequestLines(repo, number) {
@@ -600,16 +625,17 @@ async function suggest(repo, p, changes) {
     let fits = true;
     for (const f of change.files) {
       const file = path.posix.join(p.testsDir, f.path);
-      if (f.content === null || f.baseSha256 === null || !diff.has(file)) {
+      // A binary file is never a suggestion: it goes in the Qualio pull request.
+      if (f.content === null || f.encoding === 'base64' || f.baseSha256 === null || !diff.has(file)) {
         fits = false;
         break;
       }
-      const current = await fileAt(repo, file, head).catch(() => null);
-      if (current === null || sha256(current) !== f.baseSha256) {
+      const bytes = await fileAt(repo, file, head).catch(() => null);
+      if (bytes === null || sha256(bytes) !== f.baseSha256) {
         fits = false;
         break;
       }
-      const found = suggestionComments(file, current, f.content, diff.get(file));
+      const found = suggestionComments(file, bytes.toString('utf8'), f.content, diff.get(file));
       if (!found) {
         fits = false;
         break;
@@ -672,7 +698,7 @@ async function qualioPullRequest(repo, p, changes) {
     for (const f of files) {
       const now = await current(f.repoPath);
       const nowHash = now === null ? null : sha256(now);
-      const want = f.content === null ? null : sha256(f.content);
+      const want = changeHash(f);
       if (nowHash !== want) already = false;
       if (nowHash !== f.baseSha256 && nowHash !== want) conflict = f.path;
     }
@@ -685,16 +711,23 @@ async function qualioPullRequest(repo, p, changes) {
       result.delivered.push({ id: change.id, via: 'qualio_pr', commitSha: null });
       continue;
     }
-    const t = await github('POST', `${repo}/git/trees`, {
-      base_tree: tree,
-      tree: files.map((f) => (f.content === null ? { path: f.repoPath, mode: '100644', type: 'blob', sha: null } : { path: f.repoPath, mode: '100644', type: 'blob', content: f.content })),
-    });
+    // A binary file (base64) becomes a blob first: a tree entry's content is text only.
+    const entries = [];
+    for (const f of files) {
+      if (f.content === null) entries.push({ path: f.repoPath, mode: '100644', type: 'blob', sha: null });
+      else if (f.encoding === 'base64') {
+        const blob = await github('POST', `${repo}/git/blobs`, { content: f.content, encoding: 'base64' });
+        if (!ok(blob)) return { ...result, failed: blob };
+        entries.push({ path: f.repoPath, mode: '100644', type: 'blob', sha: blob.data.sha });
+      } else entries.push({ path: f.repoPath, mode: '100644', type: 'blob', content: f.content });
+    }
+    const t = await github('POST', `${repo}/git/trees`, { base_tree: tree, tree: entries });
     if (!ok(t)) return { ...result, failed: t };
     const c = await github('POST', `${repo}/git/commits`, { message: `${change.message}\n\n${change.body}\n\nqualio-change: ${change.id}`, tree: t.data.sha, parents: [parent] });
     if (!ok(c)) return { ...result, failed: c };
     parent = c.data.sha;
     tree = t.data.sha;
-    for (const f of files) known.set(f.repoPath, f.content);
+    for (const f of files) known.set(f.repoPath, f.content === null ? null : f.encoding === 'base64' ? Buffer.from(f.content, 'base64') : Buffer.from(f.content));
     result.delivered.push({ id: change.id, via: 'qualio_pr', commitSha: parent });
   }
   if (parent === baseSha) return { ...result, empty: true };
@@ -882,7 +915,7 @@ async function outbox(waitMinutes = '0') {
     // changes: this action offers Qualio's changes to the tests (suggestions, the Qualio pull request).
     // lease: a sharded run's jobs end together; each item goes out from one of them.
     // sharding: this action opens Qualio's pull request that changes tests.shards.max.
-    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true, sharding: true, ...(process.env.QUALIO_SHARDED === 'true' && { lease: true }) });
+    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true, sharding: true, binary: true, ...(process.env.QUALIO_SHARDED === 'true' && { lease: true }) });
     if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
     const batch = await sendBatch(body.items);
     sent += batch.sent;
