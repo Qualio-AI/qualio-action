@@ -27,206 +27,33 @@ The tests live in the folder the `config` block's `tests.path` names (`e2e` by d
 
 ## Part 1: Set up Qualio for your repository
 
-This is the whole flow, from an empty Qualio workspace to a tested, self-healing pull request. Qualio's in-app guide (**Docs → Getting started**, opened from a project) shows the same steps with your project's own values filled in.
+The full setup guide lives in Qualio's docs, at `https://qualio.example.com/docs`. They are public, and when opened from a project they fill in that project's own values. In short:
 
-### What you need
+1. **Create a project** in Qualio and copy its API key (Settings → API keys).
+2. **Add the repository secrets** (Settings → Secrets and variables → Actions):
+   - `QUALIO_API_KEY`
+   - for each test role, `E2E_<ROLE>_USERNAME` and `E2E_<ROLE>_PASSWORD` (`Head teacher` → `E2E_HEAD_TEACHER_*`)
 
-- A Qualio account with a workspace (you are its **Owner** or **Admin**).
-- A GitHub repository for the tests. It can be your application's repository or a separate one. You need **admin** rights on it to install the GitHub App and add secrets.
-- An environment of your application to test (staging, preview or test), with one test account per user role (e.g. *Admin*, *Teacher*). Never use production accounts.
-- Optional: the [GitHub CLI](https://cli.github.com) (`gh`) for the commands below. Every step can also be done in the browser.
+   Qualio never stores test-account credentials: they stay in your secrets and the job's `env`.
+3. **Add `.github/workflows/qualio.yml`** in a pull request. The setup wizard's **Create in GitHub** opens GitHub's editor with the file filled in. Start your app in the `e2e` job, before the Qualio step.
+4. **Allow GitHub Actions to create pull requests**: repository Settings → Actions → General → Workflow permissions. Qualio delivers new tests and some fixes as its own pull request into your branch.
+5. **Push.** The first run maps the app in the job and runs the tests already in the folder `tests.path` names. Qualio reads them into features; nothing is generated.
 
-### How it fits together
+Optional:
+- **The Qualio GitHub App** adds the Qualio E2E check with decision buttons. Its permissions are Metadata (read), and Checks, Commit statuses, Actions and Issues (read and write). It **never** has Contents, Pull requests or Workflows, so it can't read code.
+- **Jira Cloud**, connected with OAuth in Settings → Jira. The connected account needs *Browse projects* and *Add comments* in the chosen projects.
 
-```
-Qualio (agents)                         Your GitHub repository
-───────────────                         ──────────────────────
-Analyst writes the spec
-Coder writes the tests                  pull request (your branch)
-        │                                     │  pull_request / Run tests
-        ▼                                     ▼
-Qualio's changes (not committed) ──►    GitHub Actions runner: qualio-ai/qualio-action@v1
-                                          checkout e2e/ → snapshot to Qualio → Qualio's changes on top
-                                          npm ci → Chromium → playwright test (Qualio's reporter)
-Runs, artifacts, heal   ◄── results ──    re-run with the fix after a heal
-Suggestions, Qualio PR  ──── outbox ──►   review suggestions on your PR, qualio/pr-<n> → your branch
-```
+Where each topic lives in the docs:
 
-Qualio keeps the specs, the runs, the logs and the artifacts. It keeps a copy of the tests folder only while a pull request needs it (at most 14 days), and never the rest of your repository.
-
-### Step 1: Create the project
-
-1. In your workspace, choose **New project**.
-2. Optionally give the **application URL in CI**: where the app runs inside your GitHub Actions job (default `http://localhost:3000`). Qualio never reaches your app itself: it is mapped and tested in your CI, by this action.
-3. Copy the **Project API key** shown after creation. It is shown only once (you can generate a new one later, see Step 4).
-4. The setup wizard continues with test accounts, the repository and the **setup pull request** (Step 3). Every step can be skipped and resumed from the project overview.
-5. In **Project settings**, write the **project overview**: what the app does, its main user journeys, domain terms and business rules. All agents read it first.
-
-### Step 2: Add test accounts
-
-Under **Project settings → Test accounts**, add one account per role with its username and password. Qualio stores the passwords encrypted. In CI, where the app is mapped and tested, each role becomes a pair of repository secrets:
-
-| Role in Qualio | Secrets in GitHub |
+| Topic | Docs page |
 | --- | --- |
-| `Admin` | `E2E_ADMIN_USERNAME`, `E2E_ADMIN_PASSWORD` |
-| `Head teacher` | `E2E_HEAD_TEACHER_USERNAME`, `E2E_HEAD_TEACHER_PASSWORD` |
-
-(Upper case, with spaces and dashes turned into `_`. Projects without roles use `E2E_USERNAME` / `E2E_PASSWORD`.)
-
-### Step 3: The setup pull request maps the app and runs your tests
-
-The wizard's **Create in GitHub** opens GitHub's editor with `.github/workflows/qualio.yml` filled in, on a branch named `qualio-bot/setup`. Edit its **Start the application** step so your app runs in the job, add the secrets (Step 5), and push. Qualio generates nothing: it works on top of the tests you have. The workflow's **first run**:
-
-1. maps the application in the job with the mapper Qualio sends (signed out, then as each role; it follows links but never submits forms), and uploads each page's accessibility tree, form fields, verified locators and a screenshot to Qualio's **Knowledge base**;
-2. runs your Playwright tests from the folder `tests.path` names, as they are, with your own `playwright.config` (the action adds Qualio's reporter to the run when the config doesn't list it);
-3. sends Qualio the tests folder, and Qualio reads the tests to learn which features they cover. They appear under **Features**; from then on Qualio heals them, explains their failures and adds tests for your tickets on top. Nothing changes in your repository.
-
-No tests yet? The job passes and runs nothing; the first approved ticket's tests start the folder. The map is made once; **Map again** on Qualio's Map page maps the app on the next job on the target branch.
-
-### Step 4: Connect the GitHub repository
-
-1. Open **Project settings → GitHub → Connect GitHub**.
-2. GitHub asks you to install the **Qualio GitHub App**. Install it on the account or organization that owns the tests repository, and select **Only select repositories → your repository**. The app needs read and write access to contents, pull requests, workflows and actions (to open PRs, commit heals and start **Run tests**).
-3. Back in Qualio, choose:
-   - the **repository**,
-   - the **target branch** that Qualio's pull requests go into (e.g. `main`),
-   - the **tests folder** (default `e2e`). This is the action's `working-directory`.
-4. If you didn't copy a key in Step 1, open **Settings → API keys** and generate one for the project. Keys can be rotated and revoked there. Qualio stores only a hash, so copy the key now.
-
-### Step 5: Add the repository secrets and variables
-
-In GitHub, open the repository's **Settings → Secrets and variables → Actions**:
-
-- **Secrets** tab → **New repository secret** for each secret.
-- **Variables** tab → **New repository variable** for each variable.
-
-Or use the GitHub CLI (each `gh secret set` prompts for the value, so it never lands in your shell history):
-
-```sh
-REPO=your-org/your-repo
-
-# Required: lets the workflow report results to Qualio.
-gh secret set QUALIO_API_KEY --repo $REPO
-
-# One pair per test account role (see Step 2).
-gh secret set E2E_ADMIN_USERNAME --repo $REPO
-gh secret set E2E_ADMIN_PASSWORD --repo $REPO
-
-# Optional: the environment under test (default: the target URL from Qualio).
-gh variable set QUALIO_BASE_URL --repo $REPO --body https://staging.example.com
-
-# Optional: where your runners reach Qualio (default: written into qualio.yml by Qualio).
-gh variable set QUALIO_API_URL --repo $REPO --body https://qualio.example.com
-```
-
-| Name | Kind | Required | Purpose |
-| --- | --- | --- | --- |
-| `QUALIO_API_KEY` | Secret | Yes | The Project API key. Without it the tests still run, but nothing is reported or healed. |
-| `E2E_<ROLE>_USERNAME`, `E2E_<ROLE>_PASSWORD` | Secrets | If the app needs sign-in | One pair per test account role. |
-| `QUALIO_BASE_URL` | Variable | No | The URL of the environment under test. |
-| `QUALIO_API_URL` | Variable | No | The Qualio URL your runners report to. |
-
-Check that the key works:
-
-```sh
-curl -H "Authorization: Bearer <your key>" https://qualio.example.com/v1/auth/verify
-```
-
-### Step 6: Make sure the runner can reach your app
-
-The tests open your app from the GitHub Actions runner, so the runner needs network access to it:
-
-- **App reachable from the internet** (public staging, preview deployments): the generated workflow's `runs-on: ubuntu-latest` works as is.
-- **App only inside your network:** use a [self-hosted runner](https://docs.github.com/en/actions/hosting-your-own-runners) that sits in that network, and change `runs-on` in `.github/workflows/qualio.yml` to its labels (e.g. `runs-on: [self-hosted, linux]`). The runner needs Linux or macOS, Node.js-compatible tooling and outbound HTTPS to GitHub and to Qualio. The action installs Chromium and its system packages (on Linux this needs `sudo`).
-
-The runner always needs outbound HTTPS to Qualio (`QUALIO_API_URL`) to report results. Qualio never connects into your network.
-
-### Step 7: Create your first feature
-
-After the first run (Step 3), create features yourself:
-
-1. **Features → New feature**: describe what users should be able to do. Features also arrive as **Tickets**, pasted, from Jira (**Project settings → Jira → Connect with Jira**) or from `POST /v1/tickets`.
-2. Answer the **Analyst's** clarifying questions in the feature chat.
-3. Review the user stories and test cases, then choose **Approve spec**.
-4. The **Coder** writes Playwright + TypeScript tests (Page Object Model, accessible locators), type-checks them, and opens a pull request from `qualio-bot/<FEATURE-KEY>` (e.g. `qualio-bot/SCH-9`, or `qualio-bot/F-1001`) into your target branch.
-
-The **first** Qualio pull request also adds:
-
-- `e2e/package.json`, `e2e/playwright.config.ts`, `e2e/support/*` (test fixture, accounts, the Qualio reporter);
-- `.github/workflows/qualio.yml`, which calls this action:
-
-```yaml
-name: Qualio E2E
-
-on:
-  pull_request:
-    paths: ['e2e/**']
-  workflow_dispatch:
-
-concurrency:
-  group: qualio-e2e-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Test accounts, read by e2e/support/env.ts.
-    env:
-      E2E_ADMIN_USERNAME: ${{ secrets.E2E_ADMIN_USERNAME }}
-      E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: qualio-ai/qualio-action@v1
-        with:
-          working-directory: e2e
-          api-key: ${{ secrets.QUALIO_API_KEY }}
-          api-url: ${{ vars.QUALIO_API_URL || 'https://qualio.example.com' }}
-          base-url: ${{ vars.QUALIO_BASE_URL }}
-```
-
-Qualio never overwrites this file afterwards, so you can customise it (runner, triggers, timeout). Keep `workflow_dispatch` and the file name `qualio.yml`: Qualio's **Run tests** button and the re-run after a heal start the workflow by that name. If you add a role later, add its two `env` lines here as well.
-
-### Step 8: The run, the results and self-healing
-
-1. The pull request triggers **Qualio E2E**. The action installs the dependencies and Chromium, runs `npx playwright test`, and the Qualio reporter sends every result to Qualio, with videos, screenshots, traces and page snapshots of failures.
-2. The run appears in Qualio under **Runs** and on the feature, which moves to **Passing** or **Failing**. The GitHub job summary links to it, and Playwright's HTML report is kept as the `playwright-report` artifact.
-3. **Pass:** the check is green. Review the code like any pull request and merge it. The feature becomes **Merged**.
-4. **Fail:** Qualio's Runner classifies each failure:
-   - **Test drift** (selector, text or layout change while the app behaves as specified): Qualio fixes the page objects, the action writes the fix into the job's checkout and runs the tests again. Once they pass, Qualio suggests the fix on the pull request (a review with ```` ```suggestion ```` blocks), or adds it to its pull request into your branch when the lines aren't in your diff. Commit the suggestion or merge Qualio's pull request. With *Balanced* or *Autonomous* self-healing a verified fix makes the check green right away; main keeps failing until the fix is committed. It makes at most 3 attempts per pull request and never removes assertions or skips tests.
-   - **Application bug** (server errors, failed requests, error pages, or a control that disappeared): the tests are **not** changed. Qualio comments on the pull request, sets a failing `qualio/regression` commit status, and, for Jira tickets, comments on the issue mentioning its reporter. Fix the app, or update the spec in the chat if the change was intended.
-5. **Run tests** on a feature re-runs the workflow at any time.
-
-To make the tests gate merges, add the **Qualio E2E / e2e** check under **Settings → Branches → Branch protection rules → Require status checks to pass** (and `qualio/regression` if you want regressions to block too).
-
-### Running the tests locally
-
-```sh
-cd e2e
-npm install
-npx playwright install chromium
-E2E_ADMIN_USERNAME=… E2E_ADMIN_PASSWORD=… QUALIO_BASE_URL=https://staging.example.com npx playwright test
-```
-
-Without `QUALIO_API_KEY`, local runs are not reported to Qualio.
-
-### Troubleshooting
-
-| Symptom | Fix |
-| --- | --- |
-| `Unable to resolve action qualio-ai/qualio-action@v1` | The `uses:` line must be exactly `qualio-ai/qualio-action@v1`. If your organization restricts actions (**Settings → Actions → General → Allow … actions**), allow `qualio-ai/qualio-action@*`. While the action's repository is private, only repositories in the `Qualio-AI` organization can use it (Part 3, step 1). |
-| `The tests folder 'e2e' does not exist` | `tests.path` in the `config` block must name your tests folder, and `actions/checkout` must run before the action. |
-| `can't push Qualio's branch (qualio/*)` warning | Add `contents: write` to the workflow's `permissions`: the action pushes only Qualio's own `qualio/*` branches. Until then Qualio's changes are shown in its pull request report. |
-| `GitHub didn't let it open the pull request` warning | Allow it in the repository's **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests** (greyed out: an organization owner allows it in the organization's settings first), or open the pull request from the compare link in the warning. Qualio keeps the changes and the next job tries again; Qualio's project pages link to the steps. |
-| `api-key or api-url is empty` warning, or `[qualio] … not set` | Add the `QUALIO_API_KEY` secret. Pull requests from **forks** get no secrets from GitHub, so their runs are never reported. |
-| `[qualio] Could not register the run: 401` | The key is wrong, revoked or belongs to another project. Create a new one under **Settings → API keys** and update the secret. |
-| `[qualio] Could not register the run: fetch failed` | The runner can't reach Qualio. Check `QUALIO_API_URL` and outbound HTTPS from the runner. |
-| The run shows **Errored** in Qualio | The workflow stopped before reporting. Open the job's logs in GitHub. |
-| Tests fail at sign-in | Set `E2E_<ROLE>_USERNAME` / `_PASSWORD` for every role, and add each pair to the job's `env` in `qualio.yml`. |
-| `page.goto: net::ERR_NAME_NOT_RESOLVED` / timeouts | The runner can't reach the app. Check `QUALIO_BASE_URL`, or use a self-hosted runner (Step 6). |
-| **Run tests** does nothing | `qualio.yml` must keep `workflow_dispatch` and its file name, and exist on the branch being run. |
-
----
+| The steps, with your values | `/docs/getting-started` |
+| Every `config` key, with examples | `/docs/configuration` |
+| Jobs, secrets, workflow permissions, inputs, `/qualio` commands | `/docs/workflow` |
+| The GitHub App's permissions, branch protection | `/docs/github` |
+| Jira permissions and OAuth scopes | `/docs/jira` |
+| Verdicts, levels, rules | `/docs/self-healing` |
+| Troubleshooting | `/docs/troubleshooting` |
 
 ## Part 2: Action reference
 
