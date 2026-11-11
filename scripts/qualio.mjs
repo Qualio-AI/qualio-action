@@ -190,10 +190,33 @@ async function testsFolder(branch, input) {
   if (!apiKey || !apiUrl) return { rel: input || 'e2e', abs: path.resolve(workspace(), input || 'e2e'), moving: false, offline: true };
   const { status, body } = await call('/v1/tests/prepare', { branch });
   if (status !== 200) throw new Error(`Asking Qualio for the tests folder failed (${status}): ${body.error ?? 'unknown error'}`);
+  await exportTestEnv(body.env);
   const rel = body.managed ? body.testsDir : (input || body.testsDir);
   const abs = path.resolve(workspace(), rel);
   if (abs !== workspace() && !abs.startsWith(workspace() + path.sep)) throw new Error(`The tests folder ${rel} is outside the repository.`);
   return { rel, abs, moving: Boolean(body.moving) };
+}
+
+// The variables the tests' support/email.ts reads (qualio.yml's email: where the app's emails are caught in this job).
+const TEST_ENV = /^QUALIO_MAIL(?:_(?:URL|DOMAIN|SERVER))?$/;
+
+/**
+ * Exports the test environment Qualio answers (only QUALIO_MAIL*, never a secret: a hosted inbox's API key
+ * comes from the job's own QUALIO_MAIL_API_KEY) for the later steps that run Playwright. A variable the job
+ * already sets wins.
+ */
+async function exportTestEnv(env) {
+  if (!env || typeof env !== 'object') return {};
+  const exported = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (!TEST_ENV.test(name) || typeof value !== 'string' || /[\r\n]/.test(value) || process.env[name]) continue;
+    exported[name] = value;
+    process.env[name] = value;
+  }
+  const lines = Object.entries(exported).map(([k, v]) => `${k}=${v}\n`).join('');
+  if (lines && process.env.GITHUB_ENV) await appendFile(process.env.GITHUB_ENV, lines);
+  if (exported.QUALIO_MAIL) console.log(`The tests read email from ${exported.QUALIO_MAIL}${exported.QUALIO_MAIL_URL ? ` (${exported.QUALIO_MAIL_URL})` : ''}.`);
+  return exported;
 }
 
 const exists = (p) => stat(p).then(() => true, () => false);

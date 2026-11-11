@@ -233,7 +233,7 @@ http
     if (req.url === '/v1/map/c1/status') return res.end(JSON.stringify(mapped ? { state: 'done', message: 'Mapped 1 page.' } : { state: 'map', message: 'Mapping the application…' }));
     // The tests folder: test/heal-fixture (its test fails until the heal); "empty" names one that doesn't exist.
     if (req.url === '/v1/tests/prepare')
-      return res.end(JSON.stringify({ testsDir: mode === 'empty' ? 'e2e-none-yet' : mode === 'move' ? 'e2e-moving' : mode === 'shards' ? 'test/shard-fixture' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review' }));
+      return res.end(JSON.stringify({ testsDir: mode === 'empty' ? 'e2e-none-yet' : mode === 'move' ? 'e2e-moving' : mode === 'shards' ? 'test/shard-fixture' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review', ...(mode === 'email' && { env: { QUALIO_MAIL: 'mailpit', QUALIO_MAIL_URL: 'http://localhost:8025', QUALIO_MAIL_DOMAIN: 'school.test', QUALIO_MAIL_API_KEY: 'never-from-qualio', PATH: '/nope' } }) }));
     if (req.url === '/v1/tests/snapshot') {
       // The contents travel only when asked for (here: always, the first time).
       if (body.files.some((f) => f.content === undefined) && !body.files.some((f) => f.content !== undefined))
