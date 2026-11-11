@@ -66,7 +66,7 @@ Where each topic lives in the docs:
 | `api-key` | required | The Project API key, from the `QUALIO_API_KEY` secret. If empty, the tests in `working-directory` (or `e2e`) still run but nothing is reported (with a warning). |
 | `api-url` | required | The Qualio URL that results are reported to. |
 | `base-url` | `''` | The environment under test. Empty uses the target URL in `playwright.config.ts`. |
-| `config` | `''` | How Qualio works on this project, as YAML (`version: 1`): `overview` (documents in the repository), `specs.approval`, `mapping` (`max-pages`, `start-paths`, `exclude`), `roles`, `github` (`target-branch`, `report`) and `jira` (`projects`, `board`, `columns`). Sent to Qualio (`POST /v1/config/sync`) in every job with a checkout; the settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. An invalid config fails the job. See [Configuration](#configuration). |
+| `config` | `''` | How Qualio works on this project, as YAML (`version: 1`): `overview` (documents in the repository), `specs.approval`, `mapping` (`start-paths`, `exclude`, `explore`), `roles`, `github` (`target-branch`, `report`) and `jira` (`projects`, `board`, `columns`). Sent to Qualio (`POST /v1/config/sync`) in every job with a checkout; the settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. An invalid config fails the job. See [Configuration](#configuration). |
 | `config-file` | `''` | A YAML file in the repository with the same config (e.g. `.qualio/config.yml`), instead of `config`. Needs `actions/checkout`. |
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
 | `setup-wait-minutes` | `25` | How long mapping the application may take when Qualio asks a job to map it (the first job, or after **Map again**), exploration (`mapping.explore`) included. The tests run after it either way. |
@@ -112,8 +112,7 @@ Qualio is configured from the workflow, so nobody needs its dashboard to set it 
             specs:
               approval: automatic           # automatic | ask-me-first
             mapping:
-              max-pages: 25
-              exclude: [/logout]
+              exclude: [/billing]
             roles:                          # credentials: secrets E2E_<ROLE>_USERNAME / _PASSWORD
               - name: Admin
                 description: Can do everything
