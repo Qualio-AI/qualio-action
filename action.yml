@@ -34,7 +34,7 @@ inputs:
     description: The URL of the environment under test. Empty uses the target URL in playwright.config.ts.
     default: ''
   config:
-    description: How Qualio works on this project, as YAML (version 1; see Qualio's Getting Started, Configuration) - the overview documents, spec approval, self-healing sensitivity, mapping, roles, GitHub and Jira. Sent to Qualio on every job with a checkout; settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. Empty leaves the settings to Qualio's webapp.
+    description: How Qualio works on this project, as YAML (version 1; see Qualio's Getting Started, Configuration) - the overview documents, spec approval, mapping, roles, GitHub and Jira. Sent to Qualio on every job with a checkout; settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. Empty leaves the settings to Qualio's webapp.
     default: ''
   config-file:
     description: A YAML file in the repository holding the same config (e.g. .qualio/config.yml), instead of the config input. Needs actions/checkout first.
