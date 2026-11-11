@@ -66,10 +66,10 @@ Where each topic lives in the docs:
 | `api-key` | required | The Project API key, from the `QUALIO_API_KEY` secret. If empty, the tests in `working-directory` (or `e2e`) still run but nothing is reported (with a warning). |
 | `api-url` | required | The Qualio URL that results are reported to. |
 | `base-url` | `''` | The environment under test. Empty uses the target URL in `playwright.config.ts`. |
-| `config` | `''` | How Qualio works on this project, as YAML (`version: 1`): `overview` (documents in the repository), `specs.approval`, `mapping` (`start-paths`, `exclude`, `explore`), `roles`, `github` (`target-branch`, `report`) and `jira` (`projects`, `board`, `columns`). Sent to Qualio (`POST /v1/config/sync`) in every job with a checkout; the settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. An invalid config fails the job. See [Configuration](#configuration). |
+| `config` | `''` | How Qualio works on this project, as YAML (`version: 1`): `overview` (optional: documents in the repository), `roles`, `github` (`target-branch`, `report`) and `jira` (`projects`, `board`, `columns`). Sent to Qualio (`POST /v1/config/sync`) in every job with a checkout; the settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. An invalid config fails the job. See [Configuration](#configuration). |
 | `config-file` | `''` | A YAML file in the repository with the same config (e.g. `.qualio/config.yml`), instead of `config`. Needs `actions/checkout`. |
 | `commit-sha` | PR head SHA, else `github.sha` | The commit the results belong to. |
-| `setup-wait-minutes` | `25` | How long mapping the application may take when Qualio asks a job to map it (the first job, or after **Map again**), exploration (`mapping.explore`) included. The tests run after it either way. |
+| `setup-wait-minutes` | `25` | How long mapping the application may take when Qualio asks a job to map it (the first job, or after **Map again**), exploration included. The tests run after it either way. |
 | `heal-wait-minutes` | `10` | How long to wait for Qualio's heal of a failed run before giving up on the re-run. |
 | `live-diagnosis` | `true` | While Qualio diagnoses failed tests, let it look at the running app from this job (see *Live diagnosis* below). `false` turns it off. |
 | `look-minutes` | `10` | At the end of a job, how long it may keep the running app open for a test chat in Qualio that asked to look at it (see *Live diagnosis* below). `0` turns it off. |
@@ -105,20 +105,17 @@ Qualio is configured from the workflow, so nobody needs its dashboard to set it 
           api-url: ${{ vars.QUALIO_API_URL }}
           config: |
             version: 1
-            overview: docs/qualio/          # .md/.txt files the agents read: domain rules, journeys, skills
+            # Optional: .md/.txt files the agents read (domain rules, journeys). Leave it commented out if you have none.
+            # overview: docs/qualio/
             tests:
               path: e2e                     # the E2E tests folder (package.json, playwright.config.ts)
               # suggestions: report-only    # review (default) | report-only: diffs in the report, no review comments
-            specs:
-              approval: automatic           # automatic | ask-me-first
-            mapping:
-              exclude: [/billing]
             roles:                          # credentials: secrets E2E_<ROLE>_USERNAME / _PASSWORD
               - name: Admin
                 description: Can do everything
 ```
 
-The step **Sync the Qualio config** sends the YAML, then the overview documents Qualio asks for (only those whose content it doesn't have yet; at most 50 files and 256 KB). Qualio validates it: problems fail the job as `::error title=Qualio config::<key>: <problem>`, unknown keys are warnings, and anything that looks like a secret is refused. The target branch's config is the project's; a pull request's stricter changes apply to its branch at once, and its looser and project-wide ones when it merges. The job summary lists what changed.
+The step **Sync the Qualio config** sends the YAML, then the overview documents Qualio asks for (only those whose content it doesn't have yet; at most 50 files and 256 KB). Qualio validates it: problems fail the job as `::error title=Qualio config::<key>: <problem>`, unknown keys and settings Qualio no longer has (`specs`, `mapping`, `github.report`, `self-healing`) are warnings, and anything that looks like a secret is refused. The target branch's config is the project's; a pull request's changes to its own branch's runs apply at once, and its project-wide ones when it merges. The job summary lists what changed.
 
 ### What it does
 
@@ -126,7 +123,7 @@ The step **Sync the Qualio config** sends the YAML, then the overview documents 
 2. On every pull request event, tells Qualio what the pull request is (`POST /v1/pr/sync`: number, title, description, branch, head commit, merged, who opened it, and the names of test account secrets that were empty). This is how Qualio follows pull requests; it never reads the repository.
 3. With `config` or `config-file`, sends Qualio the config and the overview documents it names (see [Configuration](#configuration)).
 4. Sends what Qualio queued for GitHub (see below), at the start and the end of the job.
-5. **Maps the application** when Qualio asks (`POST /v1/map/start`: the project's first job, or after **Map again**): runs the mapper Qualio sends, then polls `/v1/map/:crawlId/status`, hosting a write-guarded browser while Qualio explores (`mapping.explore`). Never fails the job; up to `setup-wait-minutes` (default 25). Output `map-state`.
+5. **Maps the application** when Qualio asks (`POST /v1/map/start`: the project's first job, or after **Map again**): runs the mapper Qualio sends, then polls `/v1/map/:crawlId/status`, hosting a write-guarded browser while Qualio explores the map. Never fails the job; up to `setup-wait-minutes` (default 25). Output `map-state`.
 6. **Prepares the tests** (`POST /v1/tests/prepare`, `/v1/tests/snapshot`): finds the tests folder (`tests.path`), sends Qualio a snapshot of it (hashes, then the contents Qualio doesn't have; never `node_modules` or Playwright's output; a binary file such as a committed `.xlsx` or PDF only as a short description: its type, size, hash and, for a workbook, its sheets and first rows), and writes the changes Qualio offers on this branch on top of the checkout (never text over a binary file; a test file a person attached in Qualio is written as its bytes) (new tests and verified fixes: they run here before they're committed, and while they wait to be). Nothing is committed. A project whose tests Qualio still kept gets the whole folder until its move pull request is merged.
 7. Installs the tests folder's dependencies (`npm ci` with a lockfile, `npm install` otherwise) and Chromium, caching the browser per Playwright version.
 8. Runs `npx playwright test` with `QUALIO_API_URL`, `QUALIO_API_KEY`, `QUALIO_BASE_URL`, `QUALIO_COMMIT_SHA`, `QUALIO_RUN_MANIFEST` (the changes it applied) and `QUALIO_REPORTER` (Qualio's reporter, which this action brings: the generated `playwright.config.ts` adds it).
@@ -136,7 +133,7 @@ The step **Sync the Qualio config** sends the YAML, then the overview documents 
 
 **Test chat looks.** The chat on a test's page in Qualio can also ask to see the running app, usually after the failed run's job has finished. Qualio then starts this workflow on the test's branch (with the GitHub App; otherwise the next push or `/qualio run` does). At the end of that job, the step *Let Qualio's test chat look at the app* asks Qualio whether a chat is waiting for this branch. If one is, the job hosts the same look-only browser (opens and checks locators, never clicks or types) while the chat uses it, and stops once the chat has been idle for 10 minutes, or after `look-minutes`. When no chat is waiting it makes one request and ends. `live-diagnosis: false` or `look-minutes: 0` turns it off.
 
-**Exploring beyond links** (with `mapping.explore: true` in the config). On the first run, after the map, Qualio may ask this job to click buttons, tabs and menus on mapped pages to find what links can't reach, such as dialogs and tab panels. This happens in a separate browser where every request that could change data is blocked before it leaves the page: non-GET `fetch` and XHR (GraphQL queries are allowed), beacons, and POST form submits. Nothing is saved, deleted or sent. Sign-out, links off `base-url`'s origin and `mapping.exclude` URLs are never clicked. The job log lists every click and every write it blocked. `live-diagnosis: false` turns this off too.
+**Exploring beyond links.** After every map, Qualio may ask this job to click buttons, tabs and menus on mapped pages to find what links can't reach, such as dialogs and tab panels. This happens in a separate browser where every request that could change data is blocked before it leaves the page: non-GET `fetch` and XHR (GraphQL queries are allowed), beacons, and POST form submits. Nothing is saved, deleted or sent. Sign-out and links off `base-url`'s origin are never clicked. The job log lists every click and every write it blocked. `live-diagnosis: false` turns this off too.
 **Auto-sharding.** Workflows Qualio generates since `v1.7.0` have a `plan` job, then an `e2e` job per shard. The plan job lists the tests with `npx playwright test --list` (your config decides testDir, testMatch and projects; Qualio's changes on the branch included) and asks Qualio (`POST /v1/tests/plan`) how to split them. Qualio packs whole files onto jobs by how long they took before, choosing the fewest jobs past which another would save less than a minute (and less than half a job's setup), at most `tests.shards.max` in the config (default 4; `1` keeps one job). Each `e2e` job asks for its files (`POST /v1/tests/plan/shard`) and passes each one to Playwright as its whole absolute path, so no other file matches. Every shard reports into the same run in Qualio, which records it and heals it once every shard has reported; a shard whose tests failed waits for that heal and re-runs its own files with the fix. The first shard maps the app when Qualio asks, and hosts the test chat's look. When Playwright can't list the tests or Qualio can't plan, one job runs every test. A job that can't read its own files fails rather than run another shard's. Older single-job workflows keep working unchanged.
 10. Uploads Playwright's HTML report as the `playwright-report` artifact (`playwright-report-shard-<n>` for a shard) and writes a job summary with the result and a link to the run in Qualio. A job that fails before the reporter sent results tells Qualio (`POST /v1/runs/errored`).
 

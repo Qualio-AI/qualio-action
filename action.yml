@@ -34,7 +34,7 @@ inputs:
     description: The URL of the environment under test. Empty uses the target URL in playwright.config.ts.
     default: ''
   config:
-    description: How Qualio works on this project, as YAML (version 1; see Qualio's Getting Started, Configuration) - the overview documents, spec approval, mapping, roles, GitHub and Jira. Sent to Qualio on every job with a checkout; settings it sets are read-only in Qualio. On a pull request, stricter changes apply to its branch at once and looser ones when it merges. Empty leaves the settings to Qualio's webapp.
+    description: How Qualio works on this project, as YAML (version 1; see Qualio's Getting Started, Configuration) - the overview documents (optional), the tests folder, roles, email, GitHub and Jira. Sent to Qualio on every job with a checkout; settings it sets are read-only in Qualio. On a pull request, changes to its branch's own runs apply at once and project-wide ones when it merges. Empty leaves the settings to Qualio's webapp.
     default: ''
   config-file:
     description: A YAML file in the repository holding the same config (e.g. .qualio/config.yml), instead of the config input. Needs actions/checkout first.
@@ -43,13 +43,13 @@ inputs:
     description: The commit the results belong to.
     default: ${{ github.event.pull_request.head.sha || github.sha }}
   setup-wait-minutes:
-    description: How long mapping the application may take when Qualio asks a job to map it (the project's first job, or after someone asked to map it again), exploration included (qualio.yml's mapping.explore). The tests run after it either way.
+    description: How long mapping the application may take when Qualio asks a job to map it (the project's first job, or after someone asked to map it again), exploration included. The tests run after it either way.
     default: '25'
   heal-wait-minutes:
     description: How long to wait for Qualio to heal failed tests before giving up on the re-run.
     default: '10'
   live-diagnosis:
-    description: While Qualio diagnoses failed tests (and, with qualio.yml's mapping.explore, while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on base-url's origin only, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
+    description: While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on base-url's origin only, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
     default: 'true'
   look-minutes:
     description: At the end of a job, how long it may keep the running app open for a test chat in Qualio that asked to look at it (with live-diagnosis on; the chat started this workflow on the branch). The job opens only the pages the chat asks for, as with live diagnosis, and stops as soon as the chat is done. 0 turns it off. Keep it within the job's timeout-minutes.
@@ -208,7 +208,7 @@ runs:
         QUALIO_API_KEY: ${{ inputs.api-key }}
         QUALIO_BASE_URL: ${{ inputs.base-url }}
         WAIT_MINUTES: ${{ inputs.setup-wait-minutes }}
-        # mapping.explore: the job hosts a browser while Qualio explores (off with live-diagnosis: false).
+        # The job hosts a browser while Qualio explores the map (off with live-diagnosis: false).
         QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" map "$RUNNER_TEMP/qualio-map" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WAIT_MINUTES"
 

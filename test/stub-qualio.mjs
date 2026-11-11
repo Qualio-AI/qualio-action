@@ -306,7 +306,7 @@ http
           scope: body.prNumber ? 'BRANCH' : 'PROJECT',
           message: `Synced ${body.overview?.length ?? 0} overview files.`,
           applied: [],
-          changes: body.prNumber ? [{ key: 'specApproval', label: 'Spec approval', from: 'Ask me first', to: 'Automatic', when: 'merge', why: 'looser' }] : [],
+          changes: body.prNumber ? [{ key: 'targetBranch', label: 'Target branch', from: 'main', to: 'develop', when: 'merge', why: 'project-wide' }] : [],
           warnings: [],
         }),
       );

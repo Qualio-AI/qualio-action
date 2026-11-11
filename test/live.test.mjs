@@ -155,7 +155,7 @@ test('hosts nothing when live diagnosis is off', async () => {
 });
 
 test('clickRefusal lets exploring click only what opens, switches or navigates within the app', () => {
-  const app = { origin: 'http://app.test:3000', excludes: ['/admin/danger'] };
+  const app = { origin: 'http://app.test:3000' };
   assert.equal(clickRefusal('button "Enrol student"', null, app), null);
   assert.equal(clickRefusal('tab "Grades"', null, app), null);
   assert.equal(clickRefusal('link "Course"', '/classes/2', app), null);
@@ -163,7 +163,6 @@ test('clickRefusal lets exploring click only what opens, switches or navigates w
   assert.match(clickRefusal('button "Sign out"', null, app), /never signs out/);
   assert.match(clickRefusal('link "Leave"', '/logout', app), /never signs out/);
   assert.match(clickRefusal('link "Docs"', 'https://docs.example/', app), /leaves the application/);
-  assert.match(clickRefusal('link "Wipe"', '/admin/danger/wipe', app), /excluded from mapping \(\/admin\/danger\)/);
 });
 
 test('the write guard blocks writes and lets reads through', async () => {
@@ -219,7 +218,7 @@ test('explores: clicks in a guarded browser, reports what opened and what was bl
   Object.assign(process.env, { QUALIO_MCP_COMMAND: JSON.stringify([process.execPath, path.join(root, 'test/fake-mcp.mjs'), log]), QUALIO_BROWSER_EXECUTABLE: process.execPath, E2E_ADMIN_USERNAME: 'admin@school.test', E2E_ADMIN_PASSWORD: 's3cret-pw' });
   try {
     const host = startBrowserHost(
-      { sessionId: 's1', roles: [{ role: 'Admin', usernameEnv: 'E2E_ADMIN_USERNAME', passwordEnv: 'E2E_ADMIN_PASSWORD' }], excludes: [] },
+      { sessionId: 's1', roles: [{ role: 'Admin', usernameEnv: 'E2E_ADMIN_USERNAME', passwordEnv: 'E2E_ADMIN_PASSWORD' }] },
       { call, baseUrl: 'http://app.test:3000', testsDir: dir, tempDir: dir, log: () => {} },
     );
     await host.done;

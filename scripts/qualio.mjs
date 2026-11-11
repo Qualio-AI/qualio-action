@@ -2,7 +2,7 @@
 //
 //   node qualio.mjs map <map-dir> <branch> <minutes>
 //                                                maps the app when Qualio asks (the first job, or a re-map),
-//                                                hosting a write-guarded browser for mapping.explore
+//                                                hosting a write-guarded browser while Qualio explores it
 //   node qualio.mjs prepare <branch> [working-directory]
 //                                                finds the tests folder (qualio.yml tests.path), sends Qualio a
 //                                                snapshot of it, and writes the changes Qualio offers on top
@@ -270,7 +270,7 @@ async function summary(lines) {
 /**
  * Maps the application in this job when Qualio asks (the project's first job, or after someone asked to
  * map it again): the mapper Qualio sends crawls the app here (signed out and as each role, with the job's
- * E2E_<ROLE>_* secrets), and with qualio.yml's mapping.explore this job then hosts a write-guarded browser
+ * E2E_<ROLE>_* secrets), and this job then hosts a write-guarded browser
  * while Qualio explores what links can't reach. Mapping generates no tests and never fails the job: a
  * problem is a warning, and the next job maps again. Outputs state: mapped, skipped (nothing to map, or an
  * older Qualio), failed.
@@ -299,7 +299,7 @@ async function map(mapDir, branch, minutes) {
   } finally {
     console.log('::endgroup::');
   }
-  // mapping.explore: while Qualio explores what links can't reach, this job hosts the browser (writes blocked).
+  // While Qualio explores what links can't reach, this job hosts the browser (writes blocked).
   const live = liveDiagnosis(mapDir);
   let host = null;
   let said = '';
@@ -1011,7 +1011,7 @@ async function overviewFiles(paths, { known, maxFiles, maxBytes }) {
 /**
  * Sends the workflow's Qualio config (the action's config input, or the file config-file names) to
  * Qualio, which validates and applies it: to the project (its first config, or the target branch), or to
- * this pull request's branch (stricter changes now, looser ones when it merges). The overview documents
+ * this pull request's branch (changes to its own runs now, project-wide ones when it merges). The overview documents
  * it names are read from the checkout and sent too. Qualio never reads the repository itself.
  */
 async function config(branch) {

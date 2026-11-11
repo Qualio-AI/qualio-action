@@ -23,7 +23,7 @@ before(async () => {
   await writeFile(path.join(repo, 'docs/qualio/skills/roles.md'), '# Roles\n');
   await writeFile(path.join(repo, 'docs/qualio/logo.png'), 'not text');
   await mkdir(path.join(repo, '.qualio'));
-  await writeFile(path.join(repo, '.qualio/config.yml'), 'version: 1\nspecs:\n  approval: automatic\n');
+  await writeFile(path.join(repo, '.qualio/config.yml'), 'version: 1\ntests:\n  suggestions: review\n');
   stub = spawn(process.execPath, [path.join(root, 'test/stub-qualio.mjs'), String(port)], { stdio: 'ignore' });
   for (let i = 0; i < 300; i++) {
     try {
@@ -69,7 +69,7 @@ test('reads config-file from the checkout', async () => {
   const { status, calls } = await config({ CONFIG_FILE: '.qualio/config.yml' });
   assert.equal(status, 0);
   assert.equal(calls[0].body.source, '.qualio/config.yml');
-  assert.match(calls[0].body.raw, /approval: automatic/);
+  assert.match(calls[0].body.raw, /suggestions: review/);
 });
 
 test('fails the job on an invalid config, both inputs, or a missing file', async () => {

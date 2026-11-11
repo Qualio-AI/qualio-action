@@ -5,7 +5,7 @@
 // JSON-RPC over stdio is spoken here directly).
 //
 // Look only: the host calls Playwright MCP's browser_navigate and browser_snapshot, nothing else, and
-// only for paths on the app's own origin (heals). Exploring (the setup's mapping.explore) also clicks one
+// only for paths on the app's own origin (heals). Exploring the map also clicks one
 // control per call, in a separate browser whose every page blocks requests that could change data
 // (WRITE_GUARD). `check` resolves locators with Playwright's own engine through
 // the snapshot's `target` (Playwright MCP parses locator text; it never evaluates it) and answers how
@@ -87,7 +87,7 @@ export const WRITE_GUARD = `(() => {
 })();`;
 
 /** An exploring browser's first page: signs in (like SIGN_IN) when the role has secrets, then installs the guard. */
-export const EXPLORE_INIT = `// Written by the Qualio action (mapping.explore): signs in with this job's secrets, then blocks every write.
+export const EXPLORE_INIT = `// Written by the Qualio action (exploring the map): signs in with this job's secrets, then blocks every write.
 const fs = require('node:fs');
 const path = require('node:path');
 const guard = fs.readFileSync(path.join(__dirname, 'write-guard.js'), 'utf8');
@@ -115,7 +115,7 @@ const CLICKABLE_ROLES = new Set(['button', 'link', 'tab', 'menuitem', 'menuitemc
 const SIGN_OUT = /\b(sign|log)[\s-]?out\b|\blogout\b|\bsignout\b/i;
 
 /** Why exploring won't click this element (null: it may), from its snapshot line and link URL. */
-export function clickRefusal(element, href, { origin, excludes = [] }) {
+export function clickRefusal(element, href, { origin }) {
   const role = /^(\w+)/.exec(element ?? '')?.[1] ?? '';
   if (!CLICKABLE_ROLES.has(role)) return `exploring only clicks buttons, links, tabs and menus, not a ${role || 'control of unknown kind'}`;
   if (SIGN_OUT.test(element)) return 'exploring never signs out';
@@ -128,8 +128,6 @@ export function clickRefusal(element, href, { origin, excludes = [] }) {
     }
     if (url.origin !== origin) return "the link leaves the application's origin";
     if (SIGN_OUT.test(url.pathname)) return 'exploring never signs out';
-    const excluded = excludes.find((e) => e && href.includes(e));
-    if (excluded) return `the link is excluded from mapping (${excluded})`;
   }
   return null;
 }
@@ -264,8 +262,8 @@ function pageText(snapshot) {
 }
 
 /**
- * Starts the host for a browser session ({ sessionId, roles: [{ role, usernameEnv, passwordEnv }], excludes? }):
- * a heal's (live diagnosis) or the first suite's setup (mapping.explore).
+ * Starts the host for a browser session ({ sessionId, roles: [{ role, usernameEnv, passwordEnv }] }):
+ * a heal's (live diagnosis), a map's exploration or a test chat's look.
  * `call` posts to Qualio (qualio.mjs's). Returns { stop, done, stats }; it ends by itself when Qualio
  * says the heal is done.
  */
@@ -351,7 +349,7 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
   }
 
   /**
-   * Exploring (mapping.explore): loads a page fresh in a browser that blocks every write, clicks one control
+   * Exploring the map: loads a page fresh in a browser that blocks every write, clicks one control
    * (a button, link, tab or menu, never sign-out or an excluded or external link) and answers what the
    * page shows then, with the writes it blocked.
    */
@@ -363,7 +361,7 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
     const found = locatorCount(control, target);
     if (found.count !== 1) throw new Error(found.count === 0 ? 'the control is not on the page' : found.count === null ? (found.error ?? 'the control could not be found') : `the locator matches ${found.count} elements`);
     const href = /^\s*- \/url: (\S+)/m.exec(target.text)?.[1] ?? null;
-    const refusal = clickRefusal(found.element, href, { origin: base.origin, excludes: session.excludes ?? [] });
+    const refusal = clickRefusal(found.element, href, { origin: base.origin });
     if (refusal) throw new Error(refusal);
     await server.tool('browser_click', { element: found.element, target: control });
     await server.tool('browser_wait_for', { time: 1 }).catch(() => {});
