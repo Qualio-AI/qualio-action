@@ -31,7 +31,7 @@ inputs:
     description: The Qualio URL that results are reported to (the generated workflow sets it).
     required: true
   base-url:
-    description: The URL of the environment under test. Empty uses the target URL in playwright.config.ts.
+    description: Optional. Overrides the config's app.url (where the app runs in this job, default http://localhost:3000), e.g. for a preview deploy whose address changes per pull request. Empty uses app.url.
     default: ''
   config:
     description: How Qualio works on this project, as YAML (version 1; see Qualio's Getting Started, Configuration) - the overview documents (optional), the tests folder, roles, email, GitHub and Jira. Sent to Qualio on every job with a checkout; settings it sets are read-only in Qualio. On a pull request, changes to its branch's own runs apply at once and project-wide ones when it merges. Empty leaves the settings to Qualio's webapp.
@@ -49,7 +49,7 @@ inputs:
     description: How long to wait for Qualio to heal failed tests before giving up on the re-run.
     default: '10'
   live-diagnosis:
-    description: While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on base-url's origin only, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
+    description: While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on the app's origin only: app.url, or base-url, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
     default: 'true'
   test-passwords:
     description: "The test accounts' passwords, one Role=password line per role (e.g. Admin=s3cret), from the repository secret QUALIO_TEST_PASSWORDS (pass that secret to this input). Each password is masked and exported as E2E_<ROLE>_PASSWORD for the map, the tests and the look-only browser; the usernames come from the Qualio config's roles[].username. A per-role secret the job's env sets wins. Passwords never leave the job."
@@ -177,6 +177,7 @@ runs:
         QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
         CONFIG: ${{ inputs.config }}
         CONFIG_FILE: ${{ inputs.config-file }}
+        BASE_URL_INPUT: ${{ inputs.base-url }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" config "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
 
     # The comment job: a reply to the Analyst or a /qualio command, relayed to Qualio (no checkout).
@@ -217,7 +218,7 @@ runs:
       env:
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
         WAIT_MINUTES: ${{ inputs.setup-wait-minutes }}
         # The job hosts a browser while Qualio explores the map (off with live-diagnosis: false).
         QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
@@ -235,6 +236,8 @@ runs:
         QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
         QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        # Set when the base-url input (or an earlier step) set it: else Qualio's app.url is exported for the tests.
+        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" prepare "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WORKING_DIRECTORY"
 
     - name: Install dependencies
@@ -325,7 +328,7 @@ runs:
         QUALIO_REPORTER_ARGS: ${{ steps.tests.outputs.reporter-args }}
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
         QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
         QUALIO_RUN_FILE: ${{ runner.temp }}/qualio-run.json
         QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
@@ -340,7 +343,7 @@ runs:
         QUALIO_API_KEY: ${{ inputs.api-key }}
         WAIT_MINUTES: ${{ inputs.heal-wait-minutes }}
         # Live diagnosis: the app's URL and the tests folder (whose Playwright Chromium the browser host uses).
-        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
         QUALIO_TESTS_DIR: ${{ steps.tests.outputs.dir }}
         QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" wait "$RUNNER_TEMP/qualio-run.json" "$WAIT_MINUTES"
@@ -366,7 +369,7 @@ runs:
         MODE: ${{ steps.tests.outputs.mode }}
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
         QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
         QUALIO_RUN_ROUND: '2'
         QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
@@ -488,7 +491,7 @@ runs:
       env:
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
         QUALIO_TESTS_DIR: ${{ steps.tests.outputs.dir }}
         QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
         LOOK_MINUTES: ${{ inputs.look-minutes }}
