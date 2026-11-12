@@ -930,28 +930,42 @@ async function sendBatch(items) {
 
 /**
  * Sends what Qualio queued for GitHub (Qualio never calls GitHub itself) with this job's GITHUB_TOKEN. With `waitMinutes`, keeps polling while Qualio says an agent is still
- * answering (a reply to the Analyst), so the answer is posted by this job. Never fails the job: what
+ * answering (a reply to the Analyst, or, at the end of a pull request's job, reading the pull request),
+ * so the answer is posted by this job. Never fails the job: what
  * can't be sent now waits for the next job.
  */
 async function outbox(waitMinutes = '0') {
   if (!process.env.GITHUB_TOKEN || !process.env.GITHUB_REPOSITORY) return;
   const deadline = Date.now() + Number(waitMinutes || 0) * 60_000;
+  // A pull request's job (not the comment job) waits only for Qualio to read that pull request, so a
+  // pull request with nothing to test ends with a green status rather than a pending one.
+  const prNumber = process.env.QUALIO_OUTBOX_PR === 'true' ? await eventPrNumber() : null;
   let sent = 0;
   let denied = false;
   let quiet = 0;
+  let waited = false;
   for (;;) {
     // report: this action edits Qualio's one report comment in place and reacts to commands.
     // changes: this action offers Qualio's changes to the tests (suggestions, the Qualio pull request).
     // lease: a sharded run's jobs end together; each item goes out from one of them.
     // sharding: this action opens Qualio's pull request that changes tests.shards.max.
-    const { status, body } = await call('/v1/pr/outbox', { report: true, changes: true, sharding: true, binary: true, ...(process.env.QUALIO_SHARDED === 'true' && { lease: true }) });
+    const { status, body } = await call('/v1/pr/outbox', {
+      report: true,
+      changes: true,
+      sharding: true,
+      binary: true,
+      ...(process.env.QUALIO_SHARDED === 'true' && { lease: true }),
+      ...(prNumber && { prNumber }),
+    });
     if (status !== 200) return console.log(`::warning title=Qualio::Could not read Qualio's GitHub updates (${status}): ${body.error ?? 'unknown error'}`);
     const batch = await sendBatch(body.items);
     sent += batch.sent;
     denied ||= batch.denied;
-    // Done when nothing is left and nobody is answering (twice: the answer's comment is queued just after).
+    // Done when nothing is left and nobody is answering (twice: the answer's comment is queued just after;
+    // a pull request's job that never had to wait is done at once).
+    waited ||= Boolean(body.waiting);
     quiet = body.items.length === 0 && !body.waiting ? quiet + 1 : 0;
-    if (Date.now() >= deadline || quiet >= 2 || denied) break;
+    if (Date.now() >= deadline || quiet >= (prNumber && !waited ? 1 : 2) || denied) break;
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
   if (sent) console.log(`Sent ${sent} update(s) from Qualio to GitHub.`);

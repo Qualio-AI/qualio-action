@@ -312,6 +312,12 @@ http
       );
     }
     if (req.url === '/v1/pr/comment') return res.end(JSON.stringify(/^\/qualio /.test(body.body) ? { outcome: 'command', command: body.body.split(' ')[1] } : { outcome: 'answered' }));
+    // "triage": Qualio reads the pull request's own ticket for two polls, then queues its green status.
+    if (req.url === '/v1/pr/outbox' && mode === 'triage') {
+      const polls = calls.filter((c) => c.route === '/v1/pr/outbox').length;
+      if (polls === 3) outbox.push({ id: 't1', kind: 'STATUS', prNumber: null, sha: 'abc1234', payload: { sha: 'abc1234', state: 'success', context: 'qualio/tests', description: 'No new tests needed' } });
+      return res.end(JSON.stringify({ items: outbox.filter((i) => !i.sent), waiting: Boolean(body.prNumber) && polls < 3 }));
+    }
     if (req.url === '/v1/pr/outbox')
       return res.end(
         JSON.stringify({

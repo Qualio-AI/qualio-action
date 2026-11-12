@@ -471,8 +471,11 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         # A sharded run's jobs end together: each claims what it sends.
         QUALIO_SHARDED: ${{ steps.shard.outputs.total > 1 }}
-        # The comment job waits for Qualio's answer, so it's posted now rather than by the next job.
-        WAIT_MINUTES: ${{ steps.check.outputs.comment == 'true' && inputs.reply-wait-minutes || '0' }}
+        # The comment job waits for Qualio's answer, so it's posted now rather than by the next job. A pull
+        # request's job waits (up to 2 minutes) only while Qualio reads that pull request, so one with
+        # nothing to test (the setup pull request, a CI or docs change) ends green instead of pending.
+        WAIT_MINUTES: ${{ steps.check.outputs.comment == 'true' && inputs.reply-wait-minutes || (startsWith(github.event_name, 'pull_request') && github.event.action != 'closed') && '2' || '0' }}
+        QUALIO_OUTBOX_PR: ${{ steps.check.outputs.comment != 'true' && startsWith(github.event_name, 'pull_request') && github.event.action != 'closed' }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" outbox "$WAIT_MINUTES"
 
     # A test chat in Qualio may ask to look at the running app after a failed run's job is gone: Qualio
