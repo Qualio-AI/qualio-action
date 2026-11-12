@@ -216,3 +216,26 @@ test("the map step exports the config's app.url before mapping", async () => {
   });
   assert.equal(await readFile(envFile, 'utf8'), 'QUALIO_BASE_URL=http://localhost:8080/app\n');
 });
+
+test("runs with the Playwright config qualio.yml's tests.config names (phase 76)", async () => {
+  const url = await stub('config');
+  const ws = await workspace();
+  const tests = path.join(ws, 'test/heal-fixture');
+  await mkdir(path.join(tests, 'tests'), { recursive: true });
+  await writeFile(path.join(tests, 'package.json'), '{}');
+  await writeFile(path.join(tests, 'tests/login.spec.ts'), 'old');
+  // Only the named config counts: without it, the folder isn't the tests folder.
+  await writeFile(path.join(tests, 'playwright.config.ts'), 'export default {};');
+  assert.throws(
+    () => execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'prepare', 'main'], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws } }),
+    (error) => /has no package\.json and playwright\.config\.mjs\. Is tests\.config \(test\/heal-fixture\/playwright\.config\.mjs\) your Playwright config/.test(`${error.stdout}${error.stderr}`),
+  );
+
+  // The named config lists Qualio's reporter: the run adds none, and names the config.
+  await writeFile(path.join(tests, 'playwright.config.mjs'), 'export default { reporter: [[process.env.QUALIO_REPORTER]] };');
+  const { outputs } = run(url, ws, ['prepare', 'main']);
+  const out = await readFile(outputs, 'utf8');
+  assert.match(out, /config=playwright\.config\.mjs/);
+  assert.match(out, /reporter-args=\n/);
+  assert.match(out, /run=true/);
+});

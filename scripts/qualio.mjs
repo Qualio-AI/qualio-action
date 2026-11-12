@@ -159,13 +159,16 @@ async function installReporter(dir) {
   return target;
 }
 
+/** The names Playwright finds a config by (and the ones qualio.yml's tests.config may name). */
+const PLAYWRIGHT_CONFIGS = ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs', 'playwright.config.cjs'];
+
 /**
  * How the run adds Qualio's reporter. Qualio's generated playwright.config.ts lists it (QUALIO_REPORTER);
  * a team's own config doesn't, so the run names it on the command line, with the list and HTML reporters
  * (the command line replaces the config's reporters). Empty when the config already has it.
  */
-async function reporterArgs(dir, reporter) {
-  for (const name of ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs', 'playwright.config.cjs']) {
+async function reporterArgs(dir, reporter, configFile = null) {
+  for (const name of configFile ? [configFile] : PLAYWRIGHT_CONFIGS) {
     const text = await readFile(path.join(dir, name), 'utf8').catch(() => null);
     if (text !== null) return text.includes('QUALIO_REPORTER') ? '' : `--reporter=list,html,${reporter}`;
   }
@@ -183,8 +186,9 @@ async function eventPrNumber() {
 }
 
 /**
- * The tests folder for this branch: qualio.yml's tests.path when it sets it, else the action's
- * working-directory input, else the project's folder in Qualio. Relative to the repository root.
+ * The tests folder for this branch: the folder of qualio.yml's tests.config (or the older tests.path) when
+ * it sets it, else the action's working-directory input, else the project's folder in Qualio. Relative to
+ * the repository root. `configFile`: the Playwright config's name in it, when Qualio names one (phase 76).
  */
 async function testsFolder(branch, input) {
   // Without Qualio (no api-key) the tests run where the input says, unreported.
@@ -195,7 +199,10 @@ async function testsFolder(branch, input) {
   const rel = body.managed ? body.testsDir : (input || body.testsDir);
   const abs = path.resolve(workspace(), rel);
   if (abs !== workspace() && !abs.startsWith(workspace() + path.sep)) throw new Error(`The tests folder ${rel} is outside the repository.`);
-  return { rel, abs, moving: Boolean(body.moving) };
+  // Qualio names the config (tests.config) in that folder; an older Qualio, or the working-directory input, leaves it to Playwright.
+  const named = typeof body.config === 'string' && path.posix.dirname(body.config) === rel.replace(/\/+$/, '') ? path.posix.basename(body.config) : null;
+  const configFile = named && PLAYWRIGHT_CONFIGS.includes(named) ? named : null;
+  return { rel, abs, moving: Boolean(body.moving), configFile };
 }
 
 // The variables Qualio may answer for the tests: the app's URL in this job (qualio.yml's app.url, unless the
@@ -362,7 +369,9 @@ async function map(mapDir, branch, minutes) {
 async function prepare(branch, input = '') {
   const folder = await testsFolder(branch, input);
   const dir = folder.abs;
-  const hasConfig = (await exists(path.join(dir, 'package.json'))) && ((await exists(path.join(dir, 'playwright.config.ts'))) || (await exists(path.join(dir, 'playwright.config.js'))));
+  const configs = folder.configFile ? [folder.configFile] : PLAYWRIGHT_CONFIGS;
+  let hasConfig = await exists(path.join(dir, 'package.json'));
+  if (hasConfig) hasConfig = (await Promise.all(configs.map((c) => exists(path.join(dir, c))))).some(Boolean);
   if (!(await exists(dir)) && folder.moving) {
     // Qualio still keeps this project's tests: run them from Qualio while the move pull request waits.
     const { status, body } = await call('/v1/tests/changes', { branch, whole: true });
@@ -382,7 +391,14 @@ async function prepare(branch, input = '') {
   // Offline (no api-key) there is nothing else to run; with Qualio, its changes may bring the folder (new
   // tests in a Qualio pull request not merged yet).
   if (missing && folder.offline) throw new Error(missingFolder(folder.rel));
-  if (!missing && !hasConfig) throw new Error(`'${folder.rel}' has no package.json and playwright.config.ts. Is tests.path the folder that holds your E2E tests?`);
+  if (!missing && !hasConfig)
+    throw new Error(
+      folder.configFile
+        ? `'${folder.rel}' has no package.json and ${folder.configFile}. Is tests.config (${folder.rel}/${folder.configFile}) your Playwright config, in the folder that holds your E2E tests?`
+        : `'${folder.rel}' has no package.json and playwright.config.ts. Is tests.config your Playwright config, in the folder that holds your E2E tests?`,
+    );
+  // The run names the config qualio.yml points at (Playwright would otherwise pick the first it finds).
+  await output({ config: folder.configFile ?? '' });
 
   if (folder.offline) {
     await output({ mode: 'repo', reporter: '' });
@@ -424,14 +440,14 @@ async function prepare(branch, input = '') {
   for (const { key, reason } of body.pending ?? [])
     console.log(`::notice title=Qualio::${key} has no tests in this run yet: ${reason}. Qualio runs this workflow again once they are written.`);
   process.env.QUALIO_REPORTER = await installReporter(dir);
-  const args = await reporterArgs(dir, process.env.QUALIO_REPORTER);
+  const args = await reporterArgs(dir, process.env.QUALIO_REPORTER, folder.configFile);
   if (args) console.log("Your playwright.config doesn't list Qualio's reporter: this job adds it to the run (with the list and HTML reporters).");
   await output({ reporter: process.env.QUALIO_REPORTER, 'reporter-args': args, mode: 'repo' });
   await output({ run: 'true', dir });
 }
 
 function missingFolder(rel) {
-  return `The tests folder '${rel}' does not exist. Set tests.path in qualio.yml's config to the folder that holds your E2E tests (with package.json and playwright.config.ts), and check out the repository first with actions/checkout.`;
+  return `The tests folder '${rel}' does not exist. Set tests.config in qualio.yml's config to your Playwright config (such as e2e/playwright.config.ts, next to the tests' package.json), and check out the repository first with actions/checkout.`;
 }
 
 /** After a heal: writes the branch's changes (now with the fix) on top of the tests folder for the re-run. */
@@ -1105,7 +1121,8 @@ async function listTests(dir) {
   if (process.env.QUALIO_PLAYWRIGHT_LIST) report = JSON.parse(await readFile(process.env.QUALIO_PLAYWRIGHT_LIST, 'utf8'));
   else {
     const out = await new Promise((resolve) => {
-      const child = spawn('npx', ['playwright', 'test', '--list', '--reporter=json'], { cwd: dir, env: { ...process.env, QUALIO_REPORTER: '' }, stdio: ['ignore', 'pipe', 'inherit'] });
+      const config = process.env.QUALIO_PLAYWRIGHT_CONFIG ? [`--config=${process.env.QUALIO_PLAYWRIGHT_CONFIG}`] : [];
+      const child = spawn('npx', ['playwright', 'test', ...config, '--list', '--reporter=json'], { cwd: dir, env: { ...process.env, QUALIO_REPORTER: '' }, stdio: ['ignore', 'pipe', 'inherit'] });
       let text = '';
       child.stdout.on('data', (d) => (text += d));
       child.on('error', () => resolve(null));

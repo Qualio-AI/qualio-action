@@ -19,10 +19,10 @@ inputs:
     description: With command comment, how long to wait for Qualio's answer (the Analyst's reply) before leaving it for the next job.
     default: '3'
   tests-source:
-    description: Deprecated and ignored. The tests always live in the repository, in the folder qualio.yml's tests.path names.
+    description: Deprecated and ignored. The tests always live in the repository, in the folder of qualio.yml's tests.config (your Playwright config).
     default: ''
   working-directory:
-    description: Deprecated. The tests folder in this repository, when the config doesn't set tests.path (Qualio's tests.path wins). Empty uses the project's folder in Qualio (e2e by default).
+    description: Deprecated. The tests folder in this repository, when the config doesn't set tests.config (Qualio's tests.config, or the older tests.path, wins). Empty uses the project's folder in Qualio (e2e by default).
     default: ''
   api-key:
     description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, results are not reported (and tests-source qualio can't download the tests).
@@ -224,7 +224,7 @@ runs:
         QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" map "$RUNNER_TEMP/qualio-map" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WAIT_MINUTES"
 
-    # The tests folder (qualio.yml's tests.path): a snapshot goes to Qualio for its agents, and the changes
+    # The tests folder (the folder of qualio.yml's tests.config): a snapshot goes to Qualio for its agents, and the changes
     # Qualio offers on this branch (verified fixes, new tests) are written on top, so they run here too.
     - name: Prepare the tests
       id: tests
@@ -288,6 +288,7 @@ runs:
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
         QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
+        QUALIO_PLAYWRIGHT_CONFIG: ${{ steps.tests.outputs.config }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" plan "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" .
 
     # A shard job runs only its files from the plan.
@@ -317,7 +318,7 @@ runs:
       run: |
         shard_args=()
         if [ -s "$RUNNER_TEMP/qualio-shard-args.txt" ]; then mapfile -t shard_args < "$RUNNER_TEMP/qualio-shard-args.txt"; fi
-        npx playwright test ${QUALIO_REPORTER_ARGS:+"$QUALIO_REPORTER_ARGS"} "${shard_args[@]}" 2>&1 | tee "$RUNNER_TEMP/qualio-playwright.log"
+        npx playwright test ${QUALIO_PLAYWRIGHT_CONFIG:+"--config=$QUALIO_PLAYWRIGHT_CONFIG"} ${QUALIO_REPORTER_ARGS:+"$QUALIO_REPORTER_ARGS"} "${shard_args[@]}" 2>&1 | tee "$RUNNER_TEMP/qualio-playwright.log"
       env:
         # A sharded run (specs/auto-sharding.md): the reporter reports this shard into the run's one Qualio run.
         QUALIO_SHARD_INDEX: ${{ inputs.shard }}
@@ -326,6 +327,8 @@ runs:
         QUALIO_JOB_STARTED_AT: ${{ steps.check.outputs.started-at }}
         # A team's own playwright.config doesn't list Qualio's reporter: prepare says how to add it.
         QUALIO_REPORTER_ARGS: ${{ steps.tests.outputs.reporter-args }}
+        # The Playwright config qualio.yml's tests.config names (empty: Playwright finds it).
+        QUALIO_PLAYWRIGHT_CONFIG: ${{ steps.tests.outputs.config }}
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
         QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
@@ -360,7 +363,7 @@ runs:
         shard_args=()
         if [ -s "$RUNNER_TEMP/qualio-shard-args.txt" ]; then mapfile -t shard_args < "$RUNNER_TEMP/qualio-shard-args.txt"; fi
         echo "::group::Re-run after Qualio's heal"
-        npx playwright test ${QUALIO_REPORTER_ARGS:+"$QUALIO_REPORTER_ARGS"} "${shard_args[@]}" 2>&1 | tee -a "$RUNNER_TEMP/qualio-playwright.log"
+        npx playwright test ${QUALIO_PLAYWRIGHT_CONFIG:+"--config=$QUALIO_PLAYWRIGHT_CONFIG"} ${QUALIO_REPORTER_ARGS:+"$QUALIO_REPORTER_ARGS"} "${shard_args[@]}" 2>&1 | tee -a "$RUNNER_TEMP/qualio-playwright.log"
         echo "::endgroup::"
       env:
         QUALIO_SHARD_INDEX: ${{ inputs.shard }}
@@ -375,6 +378,7 @@ runs:
         QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
         QUALIO_REPORTER: ${{ steps.tests.outputs.reporter }}
         QUALIO_REPORTER_ARGS: ${{ steps.tests.outputs.reporter-args }}
+        QUALIO_PLAYWRIGHT_CONFIG: ${{ steps.tests.outputs.config }}
 
     - uses: actions/upload-artifact@v4
       if: ${{ !cancelled() && inputs.upload-report == 'true' && steps.tests.outputs.run == 'true' && inputs.command != 'plan' }}
