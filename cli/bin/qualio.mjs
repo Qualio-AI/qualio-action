@@ -98,7 +98,7 @@ Usage
   qualio generate --describe "<what>"   The same for something without a ticket
   qualio run                            Run the tests folder here, report to Qualio and heal failures
   qualio status <KEY>                   Where a feature stands
-  qualio login --key <qk_…>             Save your project's API key (or set QUALIO_API_KEY)
+  qualio login <qk_…>                   Save your project's API key (or set QUALIO_API_KEY)
   qualio whoami                         Which Qualio project the key belongs to
 
 Options
@@ -545,9 +545,11 @@ async function status({ args, flags }) {
   }
 }
 
-async function login({ flags }) {
-  if (!flags.key) throw new UserError('qualio login --key qk_…  (your project’s API key, from Qualio’s Settings → API keys)');
-  const creds = { apiKey: flags.key, apiUrl: (flags['api-url'] || process.env.QUALIO_API_URL || DEFAULT_API_URL).replace(/\/+$/, '') };
+async function login({ args, flags }) {
+  // qualio login --key qk_…, or simply qualio login qk_…
+  const key = flags.key || args[0];
+  if (!key) throw new UserError('qualio login --key qk_…  (your project’s API key, from Qualio’s Settings → API keys)');
+  const creds = { apiKey: key, apiUrl: (flags['api-url'] || process.env.QUALIO_API_URL || DEFAULT_API_URL).replace(/\/+$/, '') };
   const project = await verify(creds);
   const file = credentialsFile();
   await mkdir(path.dirname(file), { recursive: true });

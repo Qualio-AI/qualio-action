@@ -109,7 +109,8 @@ test('login saves the key only once Qualio accepts it; a wrong key is refused', 
   const bad = await runCli(['login', '--key', 'qk_wrong', '--api-url', url], { cwd: dir, url, env: { QUALIO_API_KEY: '' } });
   assert.equal(bad.code, 1);
   assert.match(bad.out, /invalid or was revoked/);
-  const good = await runCli(['login', '--key', 'qk_stub', '--api-url', url], { cwd: dir, url, env: { QUALIO_API_KEY: '' } });
+  // The key may also come without --key.
+  const good = await runCli(['login', 'qk_stub', '--api-url', url], { cwd: dir, url, env: { QUALIO_API_KEY: '' } });
   assert.equal(good.code, 0, good.out);
   assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'qualio/credentials.json'), 'utf8')), { apiKey: 'qk_stub', apiUrl: url });
   const who = await runCli(['whoami'], { cwd: dir, url: '', env: { QUALIO_API_KEY: '', QUALIO_API_URL: '' } });
