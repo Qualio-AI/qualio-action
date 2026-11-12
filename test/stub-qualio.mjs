@@ -294,6 +294,22 @@ http
       return res.end(JSON.stringify({ status: healed ? 'patched' : 'running' }));
     }
     if (req.url === '/v1/pr/sync') return res.end(JSON.stringify({ ok: true }));
+    // The config's users and api, as Qualio answers them (phase 77): references the job resolves, a literal, a name the action refuses.
+    if (req.url === '/v1/config/resolve')
+      return res.end(
+        JSON.stringify({
+          state: 'resolved',
+          exports: [
+            { env: 'E2E_ADMIN_USERNAME', template: 'admin@school.test', secret: false },
+            { env: 'E2E_ADMIN_PASSWORD', template: '${ADMIN_PASSWORD}', secret: true },
+            { env: 'E2E_TEACHER_PASSWORD', template: '${TEACHER_PASSWORD}', secret: true },
+            { env: 'E2E_HEAD_PASSWORD', template: 'lit3ral-pass', secret: true },
+            { env: 'QUALIO_API_SCHOOL_API_URL', template: '${SCHOOL_API_URL:-http://localhost:3000/api}', secret: false },
+            { env: 'QUALIO_API_SCHOOL_API_HEADERS', template: '{"X-Tenant":"${TENANT}"}', secret: true, json: true },
+            { env: 'PATH', template: '/nope', secret: false },
+          ],
+        }),
+      );
     // The qualio.yml config: a locked rule is invalid; an overview is asked for, then the config is synced.
     if (req.url === '/v1/config/sync') {
       if (/bug:\s*heal/.test(body.raw)) {

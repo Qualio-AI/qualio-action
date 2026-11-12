@@ -34,7 +34,7 @@ inputs:
     description: Optional. Overrides the config's app.url (where the app runs in this job, default http://localhost:3000), e.g. for a preview deploy whose address changes per pull request. Empty uses app.url.
     default: ''
   config:
-    description: How Qualio works on this project, as YAML (version 1; see Qualio's Getting Started, Configuration) - the overview documents (optional), the tests folder, roles, email, GitHub and Jira. Sent to Qualio on every job with a checkout; settings it sets are read-only in Qualio. On a pull request, changes to its branch's own runs apply at once and project-wide ones when it merges. Empty leaves the settings to Qualio's webapp.
+    description: How Qualio works on this project, as YAML (version 1; see Qualio's Getting Started, Configuration) - the overview documents (optional), the Playwright config, users, APIs, email, GitHub and Jira. Users' and APIs' secrets are written as ${NAME} and read from this job's env. Sent to Qualio on every job with a checkout; settings it sets are read-only in Qualio. On a pull request, changes to its branch's own runs apply at once and project-wide ones when it merges. Empty leaves the settings to Qualio's webapp.
     default: ''
   config-file:
     description: A YAML file in the repository holding the same config (e.g. .qualio/config.yml), instead of the config input. Needs actions/checkout first.
@@ -52,7 +52,7 @@ inputs:
     description: While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on the app's origin only: app.url, or base-url, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
     default: 'true'
   test-passwords:
-    description: "The test accounts' passwords, one Role=password line per role (e.g. Admin=s3cret), from the repository secret QUALIO_TEST_PASSWORDS (pass that secret to this input). Each password is masked and exported as E2E_<ROLE>_PASSWORD for the map, the tests and the look-only browser; the usernames come from the Qualio config's roles[].username. A per-role secret the job's env sets wins. Passwords never leave the job."
+    description: "Deprecated: give each user a password in the config instead (users.<role>.password: ${ADMIN_PASSWORD}, set from a repository secret in the workflow's env). The test accounts' passwords, one Role=password line per role (e.g. Admin=s3cret), from the repository secret QUALIO_TEST_PASSWORDS; they fill the roles the config gives no password. Each is masked and exported as E2E_<ROLE>_PASSWORD. A per-role secret the job's env sets wins. Passwords never leave the job."
     default: ''
   look-minutes:
     description: At the end of a job, how long it may keep the running app open for a test chat in Qualio that asked to look at it (with live-diagnosis on; the chat started this workflow on the branch). The job opens only the pages the chat asks for, as with live diagnosis, and stops as soon as the chat is done. 0 turns it off. Keep it within the job's timeout-minutes.
@@ -145,13 +145,19 @@ runs:
           echo "closed=false" >> "$GITHUB_OUTPUT"
         fi
 
-    # The test accounts' passwords (QUALIO_TEST_PASSWORDS): masked, then exported for the steps that sign in.
-    - name: Read the test account passwords
-      if: inputs.test-passwords != '' && steps.check.outputs.closed != 'true' && inputs.command != 'comment' && inputs.command != 'plan'
+    # The test accounts and APIs (the config's users and api): each ${NAME} is read from this job's env (set
+    # from GitHub secrets), masked and exported for the steps that sign in or call APIs; values never reach
+    # Qualio. Then QUALIO_TEST_PASSWORDS (older workflows) fills the roles still without a password.
+    - name: Read the test accounts and APIs
+      if: (inputs.test-passwords != '' || inputs.config != '' || inputs.config-file != '') && steps.check.outputs.closed != 'true' && inputs.command != 'comment' && inputs.command != 'plan'
       shell: bash
       env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        CONFIG: ${{ inputs.config }}
+        CONFIG_FILE: ${{ inputs.config-file }}
         QUALIO_TEST_PASSWORDS: ${{ inputs.test-passwords }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" passwords
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" accounts
 
     # Qualio follows pull requests through this job (title, description, branch, head, merged); it
     # never reads the repository. Never fails the job.

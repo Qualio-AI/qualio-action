@@ -292,11 +292,11 @@ export function startBrowserHost(session, { call, baseUrl, testsDir, tempDir, lo
     if (role) {
       const account = session.roles.find((r) => r.role === role);
       // The job's own variable wins; else the username the Qualio config gives the role. The password comes
-      // from the job only (QUALIO_TEST_PASSWORDS, exported by the passwords step, or a per-role secret).
+      // from the job only (the config's users, resolved by the accounts step, QUALIO_TEST_PASSWORDS, or a per-role secret).
       const username = account && (process.env[account.usernameEnv] || account.username);
       const password = account && process.env[account.passwordEnv];
       if (!username || !password)
-        throw new Error(`can't sign in as ${role}: ${account ? (!username ? `no username (roles[].username in the Qualio config, or ${account.usernameEnv})` : `no password (a ${role}=… line in QUALIO_TEST_PASSWORDS, or ${account.passwordEnv})`) : 'no such role'}`);
+        throw new Error(`can't sign in as ${role}: ${account ? (!username ? `no username (users.<role>.username in the Qualio config, or ${account.usernameEnv})` : `no password (users.${role}.password in the Qualio config, set from a repository secret in the workflow's env, or ${account.passwordEnv})`) : 'no such role'}`);
       Object.assign(env, { QUALIO_SIGNIN_URL: base.href, QUALIO_SIGNIN_USERNAME: username, QUALIO_SIGNIN_PASSWORD: password });
     }
     if (mode === 'explore') {

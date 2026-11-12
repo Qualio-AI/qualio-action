@@ -231,7 +231,7 @@ async function exportTestEnv(env) {
   // A role the config names a username for, without a password in this job: its sign-in would fail.
   for (const name of Object.keys(env).filter((n) => /^E2E_[A-Z0-9_]+_USERNAME$/.test(n))) {
     const password = name.replace(/_USERNAME$/, '_PASSWORD');
-    if (!process.env[password]) console.log(`::warning title=Qualio::${password} is not set, so tests that sign in with ${env[name]} will fail. Add a line for that role (Role=password) to the QUALIO_TEST_PASSWORDS secret.`);
+    if (!process.env[password]) console.log(`::warning title=Qualio::${password} is not set, so tests that sign in with ${env[name]} will fail. Give that user a password in the config (users.<role>.password: \${ROLE_PASSWORD}, set from a repository secret in the workflow's env).`);
   }
   return exported;
 }
@@ -1056,21 +1056,23 @@ async function overviewFiles(paths, { known, maxFiles, maxBytes }) {
  * this pull request's branch (changes to its own runs now, project-wide ones when it merges). The overview documents
  * it names are read from the checkout and sent too. Qualio never reads the repository itself.
  */
-async function config(branch) {
+/** The job's Qualio config: the config input, or the config-file it names (in the checkout). */
+async function readConfig() {
   const inline = process.env.CONFIG ?? '';
   const file = (process.env.CONFIG_FILE ?? '').trim();
   if (inline.trim() && file) throw new Error('Use either the config input or config-file, not both.');
-  let raw = inline;
-  let source = 'inline';
-  if (file) {
-    const root = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
-    const abs = path.resolve(root, file);
-    if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`config-file ${file} is outside the repository.`);
-    raw = await readFile(abs, 'utf8').catch(() => {
-      throw new Error(`config-file ${file} does not exist. Check out the repository first (actions/checkout) and check the path.`);
-    });
-    source = file;
-  }
+  if (!file) return { raw: inline, source: 'inline' };
+  const root = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
+  const abs = path.resolve(root, file);
+  if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`config-file ${file} is outside the repository.`);
+  const raw = await readFile(abs, 'utf8').catch(() => {
+    throw new Error(`config-file ${file} does not exist. Check out the repository first (actions/checkout) and check the path.`);
+  });
+  return { raw, source: file };
+}
+
+async function config(branch) {
+  const { raw, source } = await readConfig();
   if (!raw.trim()) return output({ scope: 'none' });
   let prNumber = null;
   if (/^pull_request/.test(process.env.GITHUB_EVENT_NAME ?? '') && process.env.GITHUB_EVENT_PATH)
@@ -1231,6 +1233,64 @@ async function errored(conclusion) {
  * exports E2E_<ROLE>_PASSWORD for the later steps (the map, the tests, the look-only browser). A variable the
  * job already sets (a per-role secret in its env) wins. Never prints a password, nor a line it can't read.
  */
+// `${NAME}` or `${NAME:-default}` in a value of qualio.yml's users or api (@qualio/shared's CONFIG_VARIABLE).
+const CONFIG_VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+const EXPORT_NAME = /^(?:E2E_[A-Z0-9_]+_(?:USERNAME|PASSWORD)|QUALIO_API_[A-Z0-9_]+)$/;
+
+/** Fills a value from the job's environment. `json`: values are escaped for a JSON string. */
+function resolveTemplate(template, env, json = false) {
+  const missing = [];
+  const value = template.replace(CONFIG_VARIABLE, (_, name, fallback) => {
+    const v = env[name] || fallback;
+    if (v === undefined) {
+      missing.push(name);
+      return '';
+    }
+    return json ? JSON.stringify(v).slice(1, -1) : v;
+  });
+  return { value, missing };
+}
+
+/**
+ * The test accounts and APIs for this job (phase 77): Qualio reads the config's users and api and answers the
+ * variables to export (E2E_<ROLE>_USERNAME/_PASSWORD, QUALIO_API_<NAME>_*), as the config writes them. Each
+ * ${NAME} is read here from the job's environment (the workflow sets it from a GitHub secret), so the value never
+ * leaves the job. Secrets are masked; a variable the job already sets wins. Then QUALIO_TEST_PASSWORDS (older
+ * workflows) fills the roles still without a password.
+ */
+async function accounts() {
+  const { raw } = await readConfig().catch((error) => {
+    console.log(`::warning title=Qualio::${error.message}`);
+    return { raw: '' };
+  });
+  if (raw.trim() && apiKey && apiUrl) {
+    const { status, body } = await call('/v1/config/resolve', { raw });
+    if (status === 422) console.log(`::warning title=Qualio::The Qualio config is invalid, so its users and APIs were not read: ${(body.problems ?? []).map((p) => `${p.key} ${p.message}`).join('; ')}`);
+    else if (status !== 200) console.log(`::warning title=Qualio::Reading the users and APIs from Qualio failed (${status}): ${body.error ?? 'unknown error'}`);
+    else {
+      const lines = [];
+      const done = [];
+      for (const item of body.exports ?? []) {
+        if (!item || typeof item.env !== 'string' || !EXPORT_NAME.test(item.env) || typeof item.template !== 'string') continue;
+        const { value, missing } = resolveTemplate(item.template, process.env, Boolean(item.json));
+        if (missing.length) {
+          console.log(`::warning title=Qualio::${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set in this job, so ${item.env} is empty. Set ${missing.length === 1 ? 'it' : 'them'} from a repository secret in the workflow's env (env: ${missing[0]}: \${{ secrets.${missing[0]} }}).`);
+          continue;
+        }
+        if (!value || /[\r\n]/.test(value)) continue;
+        if (item.secret) console.log(`::add-mask::${value}`);
+        if (process.env[item.env]) continue;
+        process.env[item.env] = value;
+        lines.push(`${item.env}=${value}\n`);
+        done.push(item.env);
+      }
+      if (lines.length && process.env.GITHUB_ENV) await appendFile(process.env.GITHUB_ENV, lines.join(''));
+      console.log(`From the config's users and api: ${done.join(', ') || 'nothing to export'}.`);
+    }
+  }
+  await passwords();
+}
+
 async function passwords() {
   const text = process.env.QUALIO_TEST_PASSWORDS ?? '';
   if (!text.trim()) return;
@@ -1248,9 +1308,9 @@ async function passwords() {
 
 const [command, ...args] = process.argv.slice(2);
 // `setup`: the name of the map step before phase 54.
-const commands = { map, setup: map, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
+const commands = { map, setup: map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use map, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
+  console.error(`Unknown command "${command}". Use map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {
