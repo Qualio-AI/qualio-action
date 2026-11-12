@@ -1,0 +1,25 @@
+{
+  "name": "@qualio-ai/cli",
+  "version": "0.1.0",
+  "description": "Qualio AI from the terminal: a feature's E2E tests written, run against your app and healed, left in your repository for you to commit.",
+  "license": "UNLICENSED",
+  "bin": {
+    "qualio": "cli/bin/qualio.mjs"
+  },
+  "files": [
+    "cli/bin",
+    "cli/README.md",
+    "scripts/*.mjs",
+    "runtime/qualio-reporter.ts"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Qualio-AI/qualio-action.git"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

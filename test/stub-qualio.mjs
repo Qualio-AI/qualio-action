@@ -51,6 +51,9 @@ const calls = [];
 // The shards a plan job's plan gave (the Test workflow's shard jobs start their own stub: test/shard-fixture's split).
 const plans = { p1: mode === 'shards' ? [['tests/one.spec.ts'], ['tests/two.spec.ts']] : [['tests/a.spec.ts', 'tests/c.spec.ts'], ['tests/b.spec.ts']] };
 let healPolls = 0;
+// "cli": the answers the CLI sent the Analyst, and how often it asked for the feature's state.
+const cliReplies = [];
+let cliPolls = 0;
 // "live": what the Runner asks the job's browser to show, and what the host answered.
 const LIVE_ROLES = [{ role: 'Admin', usernameEnv: 'E2E_ADMIN_USERNAME', passwordEnv: 'E2E_ADMIN_PASSWORD' }];
 const browserQueue = [
@@ -166,6 +169,7 @@ http
     if (req.method === 'GET' && req.url === '/__browser') return res.end(JSON.stringify(browserAnswers));
     if (req.method === 'GET' && req.url === '/__outbox') return res.end(JSON.stringify(outbox));
     if (req.method === 'GET' && req.url === '/__github') return res.end(JSON.stringify(github));
+    if (req.method === 'GET' && req.url === '/__replies') return res.end(JSON.stringify(cliReplies));
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
@@ -225,6 +229,22 @@ http
       return res.writeHead(req.url.endsWith('/dispatches') ? 204 : 201).end(req.url.endsWith('/dispatches') ? '' : JSON.stringify({ id: 1 }));
     }
     if (req.headers.authorization !== 'Bearer qk_stub') return res.writeHead(401).end(JSON.stringify({ error: 'Invalid or revoked API key' }));
+    // "cli": the qualio CLI's feature routes: the Analyst asks one question, then the Coder writes a test.
+    if (req.method === 'GET' && req.url === '/v1/auth/verify') return res.end(JSON.stringify({ project: { name: 'School' } }));
+    if (mode === 'cli' && req.url.startsWith('/v1/features/')) {
+      const feature = { key: 'SCH-42', featureKey: 'SCH-42', title: 'Archive a class', url: 'http://qualio.test/w/acme/p/school/work/42' };
+      const spec = { title: 'Archive a class', testCases: 3 };
+      if (req.url === '/v1/features/generate')
+        return res.end(JSON.stringify({ ...feature, state: 'questions', message: 'One question first.', questions: [{ question: 'Can students still see an archived class?', reason: 'It decides the read-only case.', options: ['Yes, read-only', 'No'], recommended: 'Yes, read-only' }] }));
+      if (req.url === '/v1/features/reply') {
+        cliReplies.push(body.text);
+        return res.end(JSON.stringify({ state: 'analysing' }));
+      }
+      if (req.url === '/v1/features/status') {
+        cliPolls += 1;
+        return res.end(JSON.stringify(cliPolls < 2 ? { ...feature, state: 'coding', spec } : { ...feature, state: 'ready', spec, files: ['tests/archive.spec.ts'] }));
+      }
+    }
     // "app-url": the config's app.url for the branch, answered by the map step and the tests' env.
     const appUrl = mode === 'app-url' ? { baseUrl: 'http://localhost:8080/app' } : {};
     if (req.url === '/v1/map/start') return res.end(JSON.stringify(mapMode && !mapped ? { state: 'map', crawlId: 'c1', files: mapper(), ...appUrl } : { state: 'done', ...appUrl }));
@@ -263,6 +283,7 @@ http
             pending: [],
           }),
         );
+      if (mode === 'cli') return res.end(JSON.stringify({ replace: false, revisionIds: cliPolls >= 2 ? ['t1'] : [], files: cliPolls >= 2 ? [{ path: 'tests/archive.spec.ts', content: spec('Archive') }] : [], pending: [] }));
       return res.end(JSON.stringify({ replace: false, revisionIds: healed || healedNow ? ['r2'] : [], files: healed || healedNow ? [{ path: 'tests/login.spec.ts', content: spec('Log in') }] : [], pending: [] }));
     }
     if (req.url === '/v1/tests/heal/status' && mode === 'live') {

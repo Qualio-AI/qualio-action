@@ -251,11 +251,12 @@ To withdraw a bad release, move `v1` back to the previous good tag (`git tag -f 
 
 - `action.yml`: the composite action. Steps use `shell: bash` and never echo secrets.
 - `scripts/qualio.mjs`: the Qualio API calls: `map` (maps the app when Qualio asks; `setup` is its old name), `prepare` (the tests folder: snapshot, Qualio's changes on top), `apply` (the fix, after a heal), `wait`, `sync`, `config`, `outbox` (the report, suggestions and Qualio's pull request with the Git data API), `comment`, `errored`. Node 20, no dependencies.
+- `cli/`: the local CLI, published to npm as `@qualio-ai/cli` from this repository's `package.json` (`qualio generate <KEY>`, `qualio run`; see `cli/README.md`). It imports `scripts/qualio.mjs` and runs its steps on a developer's machine, on the branch `local:<git branch>`. Publish with `npm publish --access public` after bumping `version`.
 - `scripts/diff.mjs`: line diffs, the lines a pull request's diff shows, and the suggestion comments for a fix.
 - `runtime/qualio-reporter.ts`: Qualio's Playwright reporter, a copy of `qualio-webapp/packages/reporter` (`pnpm reporter:sync` there).
 - `test/fixture`: a stand-in for a tests folder (`@playwright/test` pinned to the same version as qualio-webapp). `test/heal-fixture`: one whose test fails until Qualio's fix is written on top.
-- `test/stub-qualio.mjs`: a stub of Qualio's CI API and of GitHub's REST API (modes: `propose`, `map`, `empty`, `outbox`, `report-lost`, `changes`, `move`, `healed`).
-- `test/*.test.mjs` (`node --test test/*.test.mjs`): diffs and suggestions, prepare and apply, the outbox (report, suggestions and the Qualio pull request), config.
+- `test/stub-qualio.mjs`: a stub of Qualio's CI API and of GitHub's REST API (modes: `propose`, `map`, `empty`, `outbox`, `report-lost`, `changes`, `move`, `healed`, `cli`).
+- `test/*.test.mjs` (`node --test test/*.test.mjs`, or `npm test`): diffs and suggestions, prepare and apply, the outbox (report, suggestions and the Qualio pull request), config, the CLI.
 - `.github/workflows/test.yml`: the node tests, actionlint, the action on the fixture (`uses: ./`), the missing-folder failure path, the heal against the stub (fail, heal, re-run with the fix, pass) and the first-suite setup (map, a failing check, a passing check).
 - `.github/workflows/release.yml`: moves the major tag on each published release.
 
