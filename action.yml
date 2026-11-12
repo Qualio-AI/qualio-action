@@ -51,6 +51,9 @@ inputs:
   live-diagnosis:
     description: While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on base-url's origin only, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
     default: 'true'
+  test-passwords:
+    description: "The test accounts' passwords, one Role=password line per role (e.g. Admin=s3cret), from a repository secret: test-passwords: ${{ secrets.QUALIO_TEST_PASSWORDS }}. Each password is masked and exported as E2E_<ROLE>_PASSWORD for the map, the tests and the look-only browser; the usernames come from the Qualio config's roles[].username. A per-role secret the job's env sets wins. Passwords never leave the job."
+    default: ''
   look-minutes:
     description: At the end of a job, how long it may keep the running app open for a test chat in Qualio that asked to look at it (with live-diagnosis on; the chat started this workflow on the branch). The job opens only the pages the chat asks for, as with live diagnosis, and stops as soon as the chat is done. 0 turns it off. Keep it within the job's timeout-minutes.
     default: '10'
@@ -141,6 +144,14 @@ runs:
         else
           echo "closed=false" >> "$GITHUB_OUTPUT"
         fi
+
+    # The test accounts' passwords (QUALIO_TEST_PASSWORDS): masked, then exported for the steps that sign in.
+    - name: Read the test account passwords
+      if: inputs.test-passwords != '' && steps.check.outputs.closed != 'true' && inputs.command != 'comment' && inputs.command != 'plan'
+      shell: bash
+      env:
+        QUALIO_TEST_PASSWORDS: ${{ inputs.test-passwords }}
+      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" passwords
 
     # Qualio follows pull requests through this job (title, description, branch, head, merged); it
     # never reads the repository. Never fails the job.

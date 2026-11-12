@@ -31,6 +31,7 @@ import { appendFile, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parsePasswords } from './accounts.mjs';
 import { describeBinary, isBinary } from './binary.mjs';
 import { startBrowserHost } from './browser-host.mjs';
 import { commentableLines, suggestionBlock, suggestionComments } from './diff.mjs';
@@ -197,8 +198,9 @@ async function testsFolder(branch, input) {
   return { rel, abs, moving: Boolean(body.moving) };
 }
 
-// The variables the tests' support/email.ts reads (qualio.yml's email: where the app's emails are caught in this job).
-const TEST_ENV = /^QUALIO_MAIL(?:_(?:URL|DOMAIN|SERVER))?$/;
+// The variables Qualio may answer for the tests: support/email.ts's (qualio.yml's email: where the app's emails
+// are caught in this job) and the roles' usernames (roles[].username). Never a password.
+const TEST_ENV = /^(?:QUALIO_MAIL(?:_(?:URL|DOMAIN|SERVER))?|E2E_[A-Z0-9_]+_USERNAME)$/;
 
 /**
  * Exports the test environment Qualio answers (only QUALIO_MAIL*, never a secret: a hosted inbox's API key
@@ -216,6 +218,11 @@ async function exportTestEnv(env) {
   const lines = Object.entries(exported).map(([k, v]) => `${k}=${v}\n`).join('');
   if (lines && process.env.GITHUB_ENV) await appendFile(process.env.GITHUB_ENV, lines);
   if (exported.QUALIO_MAIL) console.log(`The tests read email from ${exported.QUALIO_MAIL}${exported.QUALIO_MAIL_URL ? ` (${exported.QUALIO_MAIL_URL})` : ''}.`);
+  // A role the config names a username for, without a password in this job: its sign-in would fail.
+  for (const name of Object.keys(env).filter((n) => /^E2E_[A-Z0-9_]+_USERNAME$/.test(n))) {
+    const password = name.replace(/_USERNAME$/, '_PASSWORD');
+    if (!process.env[password]) console.log(`::warning title=Qualio::${password} is not set, so tests that sign in with ${env[name]} will fail. Add a line for that role (Role=password) to the QUALIO_TEST_PASSWORDS secret.`);
+  }
   return exported;
 }
 
@@ -1179,11 +1186,31 @@ async function errored(conclusion) {
   if (status !== 200) console.log(`::warning title=Qualio::Could not tell Qualio this job failed (${status}): ${body.error ?? 'unknown error'}`);
 }
 
+/**
+ * The passwords step (input `test-passwords`, the QUALIO_TEST_PASSWORDS secret): masks every password and
+ * exports E2E_<ROLE>_PASSWORD for the later steps (the map, the tests, the look-only browser). A variable the
+ * job already sets (a per-role secret in its env) wins. Never prints a password, nor a line it can't read.
+ */
+async function passwords() {
+  const text = process.env.QUALIO_TEST_PASSWORDS ?? '';
+  if (!text.trim()) return;
+  const { passwords: found, unreadable } = parsePasswords(text);
+  const lines = [];
+  for (const { name, password } of found) {
+    console.log(`::add-mask::${password}`);
+    if (process.env[name]) continue;
+    lines.push(`${name}=${password}\n`);
+  }
+  if (lines.length && process.env.GITHUB_ENV) await appendFile(process.env.GITHUB_ENV, lines.join(''));
+  if (unreadable.length) console.log(`::warning title=Qualio::QUALIO_TEST_PASSWORDS: line${unreadable.length === 1 ? '' : 's'} ${unreadable.join(', ')} ${unreadable.length === 1 ? "isn't" : "aren't"} Role=password, so ${unreadable.length === 1 ? 'it was' : 'they were'} skipped.`);
+  console.log(`Test account passwords for ${found.length} role${found.length === 1 ? '' : 's'}: ${found.map((p) => p.role).join(', ') || 'none'}.`);
+}
+
 const [command, ...args] = process.argv.slice(2);
 // `setup`: the name of the map step before phase 54.
-const commands = { map, setup: map, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
+const commands = { map, setup: map, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
 if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use map, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
+  console.error(`Unknown command "${command}". Use map, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
   process.exit(2);
 }
 commands[command](...args).catch((error) => {

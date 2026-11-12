@@ -32,7 +32,7 @@ The full setup guide lives in Qualio's docs, at `https://qualio.example.com/docs
 1. **Create a project** in Qualio and copy its API key (Settings → API keys).
 2. **Add the repository secrets** (Settings → Secrets and variables → Actions):
    - `QUALIO_API_KEY`
-   - for each test role, `E2E_<ROLE>_USERNAME` and `E2E_<ROLE>_PASSWORD` (`Head teacher` → `E2E_HEAD_TEACHER_*`)
+   - `QUALIO_TEST_PASSWORDS`, when the app needs sign-in: one `Role=password` line per role in the config (`Admin=…`, `Head teacher=…`); the usernames go in the config's `roles[].username`
 
    Qualio never stores test-account credentials: they stay in your secrets and the job's `env`.
 3. **Add `.github/workflows/qualio.yml`** in a pull request. The setup wizard's **Create in GitHub** opens GitHub's editor with the file filled in. Start your app in the `e2e` job, before the Qualio step.
@@ -70,6 +70,7 @@ Where each topic lives in the docs:
 | `setup-wait-minutes` | `25` | How long mapping the application may take when Qualio asks a job to map it (the first job, or after **Map again**), exploration included. The tests run after it either way. |
 | `heal-wait-minutes` | `10` | How long to wait for Qualio's heal of a failed run before giving up on the re-run. |
 | `live-diagnosis` | `true` | While Qualio diagnoses failed tests, let it look at the running app from this job (see *Live diagnosis* below). `false` turns it off. |
+| `test-passwords` | `''` | The test accounts' passwords, one `Role=password` line per role: `${{ secrets.QUALIO_TEST_PASSWORDS }}`. Each is masked and exported as `E2E_<ROLE>_PASSWORD`; the usernames come from the config's `roles[].username` (Qualio answers them as `E2E_<ROLE>_USERNAME`). A per-role secret in the job's `env` wins. Passwords never leave the job. |
 | `look-minutes` | `10` | At the end of a job, how long it may keep the running app open for a test chat in Qualio that asked to look at it (see *Live diagnosis* below). `0` turns it off. |
 | `node-version` | `20` | The Node.js version. |
 | `upload-report` | `true` | Keep Playwright's HTML report as the `playwright-report` artifact. |
@@ -108,9 +109,11 @@ Qualio is configured from the workflow, so nobody needs its dashboard to set it 
             tests:
               path: e2e                     # the E2E tests folder (package.json, playwright.config.ts)
               # suggestions: report-only    # review (default) | report-only: diffs in the report, no review comments
-            roles:                          # credentials: secrets E2E_<ROLE>_USERNAME / _PASSWORD
+            roles:                          # passwords: Admin=… lines in the secret QUALIO_TEST_PASSWORDS
               - name: Admin
                 description: Can do everything
+                username: admin@example.com
+          test-passwords: ${{ secrets.QUALIO_TEST_PASSWORDS }}
 ```
 
 The step **Sync the Qualio config** sends the YAML, then the overview documents Qualio asks for (only those whose content it doesn't have yet; at most 50 files and 256 KB). Qualio validates it: problems fail the job as `::error title=Qualio config::<key>: <problem>`, unknown keys and settings Qualio no longer has (`specs`, `mapping`, `github.report`, `self-healing`) are warnings, and anything that looks like a secret is refused. The target branch's config is the project's; a pull request's changes to its own branch's runs apply at once, and its project-wide ones when it merges. The job summary lists what changed.
@@ -135,7 +138,7 @@ The step **Sync the Qualio config** sends the YAML, then the overview documents 
 **Auto-sharding.** Workflows Qualio generates since `v1.7.0` have a `plan` job, then an `e2e` job per shard. The plan job lists the tests with `npx playwright test --list` (your config decides testDir, testMatch and projects; Qualio's changes on the branch included) and asks Qualio (`POST /v1/tests/plan`) how to split them. Qualio packs whole files onto jobs by how long they took before, choosing the fewest jobs past which another would save less than a minute (and less than half a job's setup), at most `tests.shards.max` in the config (default 4; `1` keeps one job). Each `e2e` job asks for its files (`POST /v1/tests/plan/shard`) and passes each one to Playwright as its whole absolute path, so no other file matches. Every shard reports into the same run in Qualio, which records it and heals it once every shard has reported; a shard whose tests failed waits for that heal and re-runs its own files with the fix. The first shard maps the app when Qualio asks, and hosts the test chat's look. When Playwright can't list the tests or Qualio can't plan, one job runs every test. A job that can't read its own files fails rather than run another shard's. Older single-job workflows keep working unchanged.
 10. Uploads Playwright's HTML report as the `playwright-report` artifact (`playwright-report-shard-<n>` for a shard) and writes a job summary with the result and a link to the run in Qualio. A job that fails before the reporter sent results tells Qualio (`POST /v1/runs/errored`).
 
-Test account secrets (`E2E_<ROLE>_…`) are not inputs: set them in the job's `env`, which the action's steps inherit. The action never prints the API key.
+Test account passwords come in through `test-passwords` (the `QUALIO_TEST_PASSWORDS` secret); older workflows that set per-role secrets (`E2E_<ROLE>_…`) in the job's `env` keep working, and those win. The action never prints the API key or a password.
 
 ### What Qualio sends to GitHub
 
