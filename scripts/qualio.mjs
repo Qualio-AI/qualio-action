@@ -27,6 +27,7 @@
 // outputs go to $GITHUB_OUTPUT when it is set.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { appendFile, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1306,14 +1307,28 @@ async function passwords() {
   console.log(`Test account passwords for ${found.length} role${found.length === 1 ? '' : 's'}: ${found.map((p) => p.role).join(', ') || 'none'}.`);
 }
 
-const [command, ...args] = process.argv.slice(2);
-// `setup`: the name of the map step before phase 54.
-const commands = { map, setup: map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
-if (!commands[command]) {
-  console.error(`Unknown command "${command}". Use map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
-  process.exit(2);
+// The qualio CLI (cli/bin/qualio.mjs, @qualio-ai/cli) imports these and runs them on a developer's machine,
+// in its own process: QUALIO_API_URL and QUALIO_API_KEY must be set before it imports this module.
+export { accounts, applyFiles, call, liveDiagnosis, map, prepare, printNotices, wait, writeManifest };
+
+// Run as a script (the action's steps): `node qualio.mjs <command> [args…]`.
+const isMain = (() => {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
+if (isMain) {
+  const [command, ...args] = process.argv.slice(2);
+  // `setup`: the name of the map step before phase 54.
+  const commands = { map, setup: map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
+  if (!commands[command]) {
+    console.error(`Unknown command "${command}". Use map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
+    process.exit(2);
+  }
+  commands[command](...args).catch((error) => {
+    console.log(`::error title=Qualio::${error.message}`);
+    process.exit(1);
+  });
 }
-commands[command](...args).catch((error) => {
-  console.log(`::error title=Qualio::${error.message}`);
-  process.exit(1);
-});
