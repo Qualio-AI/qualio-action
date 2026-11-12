@@ -49,7 +49,7 @@ inputs:
     description: How long to wait for Qualio to heal failed tests before giving up on the re-run.
     default: '10'
   live-diagnosis:
-    description: While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on the app's origin only: app.url, or base-url, signed in with the role's E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.
+    description: 'While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on the app''s origin only: app.url, or base-url, signed in with the role''s E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.'
     default: 'true'
   test-passwords:
     description: "Deprecated: give each user a password in the config instead (users.<role>.password: ${ADMIN_PASSWORD}, set from a repository secret in the workflow's env). The test accounts' passwords, one Role=password line per role (e.g. Admin=s3cret), from the repository secret QUALIO_TEST_PASSWORDS; they fill the roles the config gives no password. Each is masked and exported as E2E_<ROLE>_PASSWORD. A per-role secret the job's env sets wins. Passwords never leave the job."
