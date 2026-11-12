@@ -61,6 +61,8 @@ function artifactKind(attachment: TestResult['attachments'][number]): Kind | nul
   if (attachment.name === 'trace') return 'TRACE';
   if (attachment.name === 'error-context') return 'ARIA';
   if (attachment.name === 'qualio-signals') return 'LOG';
+  // Where things were on the failure page (support/test.ts v2): Qualio marks the problem on the screenshot.
+  if (attachment.name === 'qualio-layout') return 'LOG';
   if (attachment.contentType.startsWith('image/')) return 'SCREENSHOT';
   return null;
 }
