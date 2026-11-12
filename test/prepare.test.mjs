@@ -184,3 +184,35 @@ test("exports the email setup Qualio answers for the steps that run the tests, n
   assert.equal(await readFile(envFile, 'utf8'), 'QUALIO_MAIL=mailpit\nQUALIO_MAIL_URL=http://localhost:8025\n');
   assert.match(log, /The tests read email from mailpit \(http:\/\/localhost:8025\)/);
 });
+
+test("exports the config's app.url as QUALIO_BASE_URL, unless the job (the base-url input) set one", async () => {
+  const url = await stub('app-url');
+  const ws = await workspace();
+  const tests = path.join(ws, 'test/heal-fixture');
+  await mkdir(path.join(tests, 'tests'), { recursive: true });
+  await writeFile(path.join(tests, 'package.json'), '{}');
+  await writeFile(path.join(tests, 'playwright.config.ts'), 'export default {};');
+  await writeFile(path.join(tests, 'tests/login.spec.ts'), 'old');
+  const prepare = (envFile, extra = {}) =>
+    execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'prepare', 'main'], {
+      encoding: 'utf8',
+      env: { ...process.env, QUALIO_BASE_URL: '', QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt'), GITHUB_ENV: envFile, QUALIO_RUN_MANIFEST: path.join(ws, 'manifest.json'), QUALIO_COMMIT_SHA: 'abc1234', ...extra },
+    });
+  const fromConfig = path.join(ws, 'env-config.txt');
+  assert.match(prepare(fromConfig), /The app's URL in this job: http:\/\/localhost:8080\/app/);
+  assert.equal(await readFile(fromConfig, 'utf8'), 'QUALIO_BASE_URL=http://localhost:8080/app\n');
+  const fromInput = path.join(ws, 'env-input.txt');
+  prepare(fromInput, { QUALIO_BASE_URL: 'https://pr-7.preview.example.com' });
+  assert.equal(await readFile(fromInput, 'utf8').catch(() => ''), '');
+});
+
+test("the map step exports the config's app.url before mapping", async () => {
+  const url = await stub('app-url');
+  const ws = await workspace();
+  const envFile = path.join(ws, 'env.txt');
+  execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'map', path.join(ws, 'map'), 'main', '1'], {
+    encoding: 'utf8',
+    env: { ...process.env, QUALIO_BASE_URL: '', QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt'), GITHUB_ENV: envFile },
+  });
+  assert.equal(await readFile(envFile, 'utf8'), 'QUALIO_BASE_URL=http://localhost:8080/app\n');
+});

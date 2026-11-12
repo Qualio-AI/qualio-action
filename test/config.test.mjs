@@ -86,3 +86,13 @@ test('fails the job on an invalid config, both inputs, or a missing file', async
   assert.equal(outside.status, 1);
   assert.match(outside.stdout, /outside the repository/);
 });
+
+test("says when the workflow's base-url input overrides the config's app.url", async () => {
+  const overridden = await config({ CONFIG: 'version: 1\napp:\n  url: http://localhost:4000\n', BASE_URL_INPUT: 'https://pr-7.preview.example.com' });
+  assert.equal(overridden.status, 0, overridden.stdout);
+  assert.match(overridden.stdout, /::notice title=Qualio config::The workflow's base-url input \(https:\/\/pr-7\.preview\.example\.com\) overrides the config's app\.url \(http:\/\/localhost:4000\)/);
+  const same = await config({ CONFIG: 'version: 1\napp:\n  url: http://localhost:4000\n', BASE_URL_INPUT: 'http://localhost:4000/' });
+  assert.doesNotMatch(same.stdout, /overrides the config's app\.url/);
+  const none = await config({ CONFIG: 'version: 1\n' });
+  assert.doesNotMatch(none.stdout, /overrides/);
+});

@@ -198,9 +198,10 @@ async function testsFolder(branch, input) {
   return { rel, abs, moving: Boolean(body.moving) };
 }
 
-// The variables Qualio may answer for the tests: support/email.ts's (qualio.yml's email: where the app's emails
-// are caught in this job) and the roles' usernames (roles[].username). Never a password.
-const TEST_ENV = /^(?:QUALIO_MAIL(?:_(?:URL|DOMAIN|SERVER))?|E2E_[A-Z0-9_]+_USERNAME)$/;
+// The variables Qualio may answer for the tests: the app's URL in this job (qualio.yml's app.url, unless the
+// base-url input set QUALIO_BASE_URL), support/email.ts's (qualio.yml's email: where the app's emails are
+// caught in this job) and the roles' usernames (roles[].username). Never a password.
+const TEST_ENV = /^(?:QUALIO_BASE_URL|QUALIO_MAIL(?:_(?:URL|DOMAIN|SERVER))?|E2E_[A-Z0-9_]+_USERNAME)$/;
 
 /**
  * Exports the test environment Qualio answers (only QUALIO_MAIL*, never a secret: a hosted inbox's API key
@@ -212,11 +213,13 @@ async function exportTestEnv(env) {
   const exported = {};
   for (const [name, value] of Object.entries(env)) {
     if (!TEST_ENV.test(name) || typeof value !== 'string' || /[\r\n]/.test(value) || process.env[name]) continue;
+    if (name === 'QUALIO_BASE_URL' && !/^https?:\/\/\S+$/.test(value)) continue;
     exported[name] = value;
     process.env[name] = value;
   }
   const lines = Object.entries(exported).map(([k, v]) => `${k}=${v}\n`).join('');
   if (lines && process.env.GITHUB_ENV) await appendFile(process.env.GITHUB_ENV, lines);
+  if (exported.QUALIO_BASE_URL) console.log(`The app's URL in this job: ${exported.QUALIO_BASE_URL} (qualio.yml's app.url).`);
   if (exported.QUALIO_MAIL) console.log(`The tests read email from ${exported.QUALIO_MAIL}${exported.QUALIO_MAIL_URL ? ` (${exported.QUALIO_MAIL_URL})` : ''}.`);
   // A role the config names a username for, without a password in this job: its sign-in would fail.
   for (const name of Object.keys(env).filter((n) => /^E2E_[A-Z0-9_]+_USERNAME$/.test(n))) {
@@ -291,6 +294,9 @@ async function map(mapDir, branch, minutes) {
     return output({ state: 'failed' });
   }
   let state = start.body;
+  // The app's URL for this branch (qualio.yml's app.url), for the mapper, its browser and the later steps;
+  // the base-url input, when the workflow sets one, wins.
+  if (typeof state.baseUrl === 'string') await exportTestEnv({ QUALIO_BASE_URL: state.baseUrl });
   if (state.state !== 'map') return output({ state: 'skipped' });
   const { crawlId } = state;
   const deadline = Date.now() + Number(minutes) * 60_000;
@@ -1062,6 +1068,9 @@ async function config(branch) {
     ({ status, body } = await call('/v1/config/sync', { ...request, overview }));
   }
   for (const w of body.warnings ?? []) console.log(`::warning title=Qualio config::${typeof w === 'string' ? w : `${w.key}: ${w.message}`}`);
+  const input = (process.env.BASE_URL_INPUT ?? '').trim().replace(/\/+$/, '');
+  if (status === 200 && input && typeof body.appUrl === 'string' && input !== body.appUrl.replace(/\/+$/, ''))
+    console.log(`::notice title=Qualio config::The workflow's base-url input (${input}) overrides the config's app.url (${body.appUrl}) in this job. Delete base-url from the workflow to use app.url.`);
   if (status === 422) {
     for (const p of body.problems ?? []) console.log(`::error title=Qualio config::${p.key}: ${p.message}`);
     throw new Error(`The Qualio config in ${source === 'inline' ? 'the workflow' : source} is invalid (see the errors above). Nothing was changed in Qualio.`);
