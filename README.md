@@ -40,7 +40,6 @@ The full setup guide lives in Qualio's docs, at `https://qualio.example.com/docs
 5. **Push.** The first run maps the app in the job and runs the tests already in the folder `tests.path` names. Qualio reads them into features; nothing is generated.
 
 Optional:
-- **The Qualio GitHub App** adds the Qualio E2E check with decision buttons. Its permissions are Metadata (read), and Checks, Commit statuses, Actions and Issues (read and write). It **never** has Contents, Pull requests or Workflows, so it can't read code.
 - **Jira Cloud**, connected with OAuth in Settings → Jira. The connected account needs *Browse projects* and *Add comments* in the chosen projects.
 
 Where each topic lives in the docs:
@@ -49,8 +48,7 @@ Where each topic lives in the docs:
 | --- | --- |
 | The steps, with your values | `/docs/getting-started` |
 | Every `config` key, with examples | `/docs/configuration` |
-| Jobs, secrets, workflow permissions, inputs, `/qualio` commands | `/docs/workflow` |
-| The GitHub App's permissions, branch protection | `/docs/github` |
+| Jobs, secrets, workflow permissions, inputs, `/qualio` commands, branch protection, what Qualio writes on GitHub | `/docs/workflow` |
 | Jira permissions and OAuth scopes | `/docs/jira` |
 | Verdicts, levels, rules | `/docs/self-healing` |
 | Troubleshooting | `/docs/troubleshooting` |
@@ -80,7 +78,7 @@ Where each topic lives in the docs:
 | `shard` | | In a sharded workflow's `e2e` job: this job's shard (`${{ matrix.shard }}`). Empty runs every test. |
 | `shard-plan` | | In a sharded workflow's `e2e` job: the plan job's `plan-id` output. |
 | `reply-wait-minutes` | `3` | With `command: comment`, how long to wait for Qualio's answer before leaving it for the next job. |
-| `github-token` | `${{ github.token }}` | Sends Qualio's pull request report (one comment, edited in place), its suggestions and its pull request into your branch, reactions, statuses, labels and re-runs (when Qualio's GitHub App isn't installed or lacks the permission). The workflow needs `permissions` `contents: write` (only Qualio's `qualio/*` branches are pushed), `pull-requests: write`, `issues: write`, `statuses: write` and `actions: write`. Empty sends nothing. |
+| `github-token` | `${{ github.token }}` | Sends Qualio's pull request report (one comment, edited in place), its suggestions and its pull request into your branch, reactions, statuses, labels and re-runs (Qualio has no GitHub App and never calls GitHub itself). The workflow needs `permissions` `contents: write` (only Qualio's `qualio/*` branches are pushed), `pull-requests: write`, `issues: write`, `statuses: write` and `actions: write`. Empty sends nothing. |
 
 ### Outputs
 
@@ -131,7 +129,7 @@ The step **Sync the Qualio config** sends the YAML, then the overview documents 
 
 **Live diagnosis.** While step 9 waits, Qualio may ask to see pages of your running app, for example to check whether a button was renamed or removed. Qualio never reaches your app; this job does it for Qualio. It starts Playwright MCP (`@playwright/mcp`, pinned, run with `npx`) on the Chromium your tests' Playwright already installed. It opens only the paths Qualio asks for on `base-url`'s origin, signed out or signed in as a role with that role's `E2E_<ROLE>_USERNAME`/`_PASSWORD` secrets. The secrets stay in the job and are passed only to the browser. Each page's accessibility snapshot is sent back, and a page that redirects to another site is not. Before Qualio applies a fix, the job also checks the fix's locators (for example `getByRole('button', { name: 'Log in' })`) on the page they belong on and reports how many elements each finds. A fix whose locators don't find exactly one element is proposed instead of applied. Nothing is clicked or filled in beyond the sign-in, and the browser process gets no other secrets (not `api-key` or `GITHUB_TOKEN`). The job log lists every page shown. Set `live-diagnosis: false` to turn it off.
 
-**Test chat looks.** The chat on a test's page in Qualio can also ask to see the running app, usually after the failed run's job has finished. Qualio then starts this workflow on the test's branch (with the GitHub App; otherwise the next push or `/qualio run` does). At the end of that job, the step *Let Qualio's test chat look at the app* asks Qualio whether a chat is waiting for this branch. If one is, the job hosts the same look-only browser (opens and checks locators, never clicks or types) while the chat uses it, and stops once the chat has been idle for 10 minutes, or after `look-minutes`. When no chat is waiting it makes one request and ends. `live-diagnosis: false` or `look-minutes: 0` turns it off.
+**Test chat looks.** The chat on a test's page in Qualio can also ask to see the running app, usually after the failed run's job has finished. Qualio then asks for this workflow on the test's branch, which the next Qualio job (a push or `/qualio run`) starts. At the end of that job, the step *Let Qualio's test chat look at the app* asks Qualio whether a chat is waiting for this branch. If one is, the job hosts the same look-only browser (opens and checks locators, never clicks or types) while the chat uses it, and stops once the chat has been idle for 10 minutes, or after `look-minutes`. When no chat is waiting it makes one request and ends. `live-diagnosis: false` or `look-minutes: 0` turns it off.
 
 **Exploring beyond links.** After every map, Qualio may ask this job to click buttons, tabs and menus on mapped pages to find what links can't reach, such as dialogs and tab panels. This happens in a separate browser where every request that could change data is blocked before it leaves the page: non-GET `fetch` and XHR (GraphQL queries are allowed), beacons, and POST form submits. Nothing is saved, deleted or sent. Sign-out and links off `base-url`'s origin are never clicked. The job log lists every click and every write it blocked. `live-diagnosis: false` turns this off too.
 **Auto-sharding.** Workflows Qualio generates since `v1.7.0` have a `plan` job, then an `e2e` job per shard. The plan job lists the tests with `npx playwright test --list` (your config decides testDir, testMatch and projects; Qualio's changes on the branch included) and asks Qualio (`POST /v1/tests/plan`) how to split them. Qualio packs whole files onto jobs by how long they took before, choosing the fewest jobs past which another would save less than a minute (and less than half a job's setup), at most `tests.shards.max` in the config (default 4; `1` keeps one job). Each `e2e` job asks for its files (`POST /v1/tests/plan/shard`) and passes each one to Playwright as its whole absolute path, so no other file matches. Every shard reports into the same run in Qualio, which records it and heals it once every shard has reported; a shard whose tests failed waits for that heal and re-runs its own files with the fix. The first shard maps the app when Qualio asks, and hosts the test chat's look. When Playwright can't list the tests or Qualio can't plan, one job runs every test. A job that can't read its own files fails rather than run another shard's. Older single-job workflows keep working unchanged.
@@ -148,7 +146,7 @@ At the start and end of every job the action sends what Qualio queued (`POST /v1
 
 Missing token permissions only print a warning; the items wait for the next job.
 
-The workflow's `comment` job runs on `issue_comment` with `command: comment`, without a checkout: it sends a person's new pull request comment to Qualio (`POST /v1/pr/comment`), a reply to the Analyst or a `/qualio accept`, `/qualio reject <why>`, `/qualio bug`, `/qualio revert` or `/qualio run` command, and posts Qualio's answer from the outbox. The Qualio GitHub App has no Contents or Pull requests permission, so pull request conversations and changes always go through the workflow.
+The workflow's `comment` job runs on `issue_comment` with `command: comment`, without a checkout: it sends a person's new pull request comment to Qualio (`POST /v1/pr/comment`), a reply to the Analyst or a `/qualio accept`, `/qualio reject <why>`, `/qualio bug`, `/qualio revert` or `/qualio run` command, and posts Qualio's answer from the outbox. Qualio has no GitHub App, so everything it says on GitHub goes through the workflow.
 
 Run the tests on the target branch on demand with Qualio's **Run tests** (it dispatches the workflow).
 
@@ -218,7 +216,7 @@ Requirements: the repository is public, it has exactly one action metadata file 
 
 1. Create a private test repository with a Qualio project connected to it (Part 1, Steps 1–5). The [school demo](https://github.com/Qualio-AI/qualio-school-demo) makes a good target app.
 2. Approve a feature, add the workflow from the Getting started page (or merge the setup pull request) and open any pull request.
-3. Confirm the **Qualio E2E** check runs, its summary links to the run in Qualio, and the run appears under **Runs**. With *Qualio*, change a button label in the pull request: the summary should show **Heal: patched** and a passing re-run.
+3. Confirm the `qualio/tests` status is set, its link opens the run in Qualio, and the run appears under **Runs**. With *Qualio*, change a button label in the pull request: the run should show **Heal: patched** and a passing re-run.
 
 ### Later releases
 

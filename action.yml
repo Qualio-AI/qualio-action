@@ -64,7 +64,7 @@ inputs:
     description: Days to keep the HTML report artifact.
     default: '14'
   github-token:
-    description: The token that sends Qualio's pull request report, suggestions, statuses, labels and re-runs when the Qualio GitHub App can't (not installed, or without the permission), and pushes Qualio's own qualio/* branch for its pull request into yours. The workflow needs `permissions` contents, pull-requests, issues, statuses and actions write for them. Empty sends nothing.
+    description: The token that sends Qualio's pull request report, suggestions, statuses, labels and re-runs (Qualio never calls GitHub itself), and pushes Qualio's own qualio/* branch for its pull request into yours. The workflow needs `permissions` contents, pull-requests, issues, statuses and actions write for them. Empty sends nothing.
     default: ${{ github.token }}
 
 outputs:
@@ -230,8 +230,12 @@ runs:
       if: steps.tests.outputs.run == 'true'
       shell: bash
       working-directory: ${{ steps.tests.outputs.dir }}
+      # A workflow that installed the dependencies itself (a pnpm or yarn monorepo, whose workspace: versions
+      # npm can't install) keeps them: the action installs only when @playwright/test doesn't resolve yet.
       run: |
-        if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+        if node -e "require.resolve('@playwright/test/package.json')" >/dev/null 2>&1; then
+          echo "The tests' dependencies are already installed (@playwright/test resolves): not installing them again."
+        elif [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
 
     - name: Read the Playwright version
       id: playwright

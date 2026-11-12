@@ -922,8 +922,7 @@ async function sendBatch(items) {
 }
 
 /**
- * Sends what Qualio couldn't send to GitHub itself (no GitHub App, or one without the permission)
- * with this job's GITHUB_TOKEN. With `waitMinutes`, keeps polling while Qualio says an agent is still
+ * Sends what Qualio queued for GitHub (Qualio never calls GitHub itself) with this job's GITHUB_TOKEN. With `waitMinutes`, keeps polling while Qualio says an agent is still
  * answering (a reply to the Analyst), so the answer is posted by this job. Never fails the job: what
  * can't be sent now waits for the next job.
  */
