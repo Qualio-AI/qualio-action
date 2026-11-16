@@ -315,7 +315,7 @@ http
       return res.end(JSON.stringify({ status: healed ? 'patched' : 'running' }));
     }
     if (req.url === '/v1/pr/sync') return res.end(JSON.stringify({ ok: true }));
-    // The config's users and api, as Qualio answers them (phase 77): references the job resolves, a literal, a name the action refuses.
+    // The test accounts and APIs, as Qualio answers them from Settings: references the job resolves, a literal, a name the action refuses.
     if (req.url === '/v1/config/resolve')
       return res.end(
         JSON.stringify({

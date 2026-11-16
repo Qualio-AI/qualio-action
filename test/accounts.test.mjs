@@ -26,7 +26,7 @@ async function stub() {
   return url;
 }
 
-test("the accounts step resolves the config's users and api from the job's env, masks secrets and lets the job env win (phase 77)", async () => {
+test("the accounts step resolves Qualio's test accounts and APIs from the job's env, masks secrets and lets the job env win (phase 83)", async () => {
   const url = await stub();
   const dir = await mkdtemp(path.join(os.tmpdir(), 'qualio-accounts-'));
   const githubEnv = path.join(dir, 'env');
@@ -38,16 +38,16 @@ test("the accounts step resolves the config's users and api from the job's env, 
       GITHUB_ENV: githubEnv,
       QUALIO_API_URL: url,
       QUALIO_API_KEY: 'qk_stub',
-      CONFIG: 'version: 1\nusers:\n  Admin:\n    password: ${ADMIN_PASSWORD}\n',
       ADMIN_PASSWORD: 's3cret',
       TENANT: 'demo "a"',
-      // The older secret fills a role the config gives no password; the job's own variable wins over both.
+      // The older secret fills a role Qualio gives no password; the job's own variable wins over both.
       QUALIO_TEST_PASSWORDS: 'Admin=old\nOther=0ther',
     },
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const calls = await (await fetch(`${url}/__calls`)).json();
-  assert.deepEqual(calls.filter((c) => c.route === '/v1/config/resolve').map((c) => c.body.raw), ['version: 1\nusers:\n  Admin:\n    password: ${ADMIN_PASSWORD}\n']);
+  // No config travels: Qualio answers from the project's Settings.
+  assert.deepEqual(calls.filter((c) => c.route === '/v1/config/resolve').map((c) => c.body), [{}]);
   assert.match(result.stdout, /::add-mask::s3cret/);
   assert.match(result.stdout, /::add-mask::lit3ral-pass/);
   assert.match(result.stdout, /::warning title=Qualio::TEACHER_PASSWORD is not set in this job, so E2E_TEACHER_PASSWORD is empty/);

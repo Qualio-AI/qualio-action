@@ -13,8 +13,7 @@
 //   node qualio.mjs look <branch> <minutes>      at the end of the job: if a test chat in Qualio asked to look at the
 //                                                running app on this branch, hosts the browser while it looks
 //   node qualio.mjs sync                         tells Qualio about this pull request (title, branch, head, merged)
-//   node qualio.mjs config <branch>              sends qualio.yml's config (CONFIG or CONFIG_FILE) and the overview
-//                                                documents it names; fails the job when the config is invalid
+//   node qualio.mjs config <branch>              does nothing (qualio.yml is gone: settings live in Qualio)
 //   node qualio.mjs outbox [wait-minutes]        sends what Qualio queued for GitHub (the report, statuses,
 //                                                dispatches, labels, and its changes to the tests: suggestions and
 //                                                the Qualio pull request) with GITHUB_TOKEN; waits for answers
@@ -1014,103 +1013,6 @@ async function comment() {
   console.log(body.outcome === 'ignored' ? `Qualio skipped the comment: ${body.reason}.` : `Qualio received the comment (${body.command ?? body.outcome}).`);
 }
 
-const OVERVIEW_EXTENSIONS = ['.md', '.markdown', '.txt'];
-
-/** The overview documents a config names: files, or the .md/.txt files of folders (recursively), inside the checkout. */
-async function overviewFiles(paths, { known, maxFiles, maxBytes }) {
-  const root = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
-  const found = new Map();
-  const visit = async (abs, rel, named) => {
-    const info = await stat(abs).catch(() => null);
-    if (!info) throw new Error(`overview: ${rel} does not exist in the checked-out repository. Check out the repository first (actions/checkout) and check the path.`);
-    if (info.isDirectory()) {
-      for (const entry of (await readdir(abs)).sort()) if (!entry.startsWith('.') && entry !== 'node_modules') await visit(path.join(abs, entry), path.posix.join(rel, entry), false);
-    } else if (OVERVIEW_EXTENSIONS.includes(path.extname(abs).toLowerCase())) found.set(rel, abs);
-    else if (named) console.log(`::warning title=Qualio config::overview: ${rel} is skipped (only ${OVERVIEW_EXTENSIONS.join(', ')} files are sent).`);
-  };
-  for (const p of paths) {
-    const rel = p.replace(/\/+$/, '') || '.';
-    const abs = path.resolve(root, rel);
-    if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`overview: ${p} is outside the repository.`);
-    await visit(abs, rel, true);
-  }
-  const files = [];
-  let bytes = 0;
-  for (const [rel, abs] of [...found].sort(([a], [b]) => a.localeCompare(b))) {
-    if (files.length >= maxFiles) {
-      console.log(`::warning title=Qualio config::overview: only the first ${maxFiles} files are sent; ${found.size - maxFiles} more are skipped.`);
-      break;
-    }
-    const content = await readFile(abs, 'utf8');
-    bytes += Buffer.byteLength(content);
-    if (bytes > maxBytes) throw new Error(`overview: the documents are over ${Math.round(maxBytes / 1024)} KB. Point overview at fewer or shorter files.`);
-    const hash = sha256(content);
-    // Only what Qualio doesn't have yet travels.
-    files.push(known.includes(hash) ? { path: rel, sha256: hash } : { path: rel, sha256: hash, content });
-  }
-  return files;
-}
-
-/**
- * Sends the workflow's Qualio config (the action's config input, or the file config-file names) to
- * Qualio, which validates and applies it: to the project (its first config, or the target branch), or to
- * this pull request's branch (changes to its own runs now, project-wide ones when it merges). The overview documents
- * it names are read from the checkout and sent too. Qualio never reads the repository itself.
- */
-/** The job's Qualio config: the config input, or the config-file it names (in the checkout). */
-async function readConfig() {
-  const inline = process.env.CONFIG ?? '';
-  const file = (process.env.CONFIG_FILE ?? '').trim();
-  if (inline.trim() && file) throw new Error('Use either the config input or config-file, not both.');
-  if (!file) return { raw: inline, source: 'inline' };
-  const root = path.resolve(process.env.GITHUB_WORKSPACE || process.cwd());
-  const abs = path.resolve(root, file);
-  if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`config-file ${file} is outside the repository.`);
-  const raw = await readFile(abs, 'utf8').catch(() => {
-    throw new Error(`config-file ${file} does not exist. Check out the repository first (actions/checkout) and check the path.`);
-  });
-  return { raw, source: file };
-}
-
-async function config(branch) {
-  const { raw, source } = await readConfig();
-  if (!raw.trim()) return output({ scope: 'none' });
-  let prNumber = null;
-  if (/^pull_request/.test(process.env.GITHUB_EVENT_NAME ?? '') && process.env.GITHUB_EVENT_PATH)
-    prNumber = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8')).pull_request?.number ?? null;
-  const request = { branch, prNumber, headSha: process.env.QUALIO_COMMIT_SHA || process.env.GITHUB_SHA || '0000000', source, raw };
-
-  let { status, body } = await call('/v1/config/sync', request);
-  // Qualio names the overview paths it needs (and the contents it already has); a second ask means it lost them.
-  for (let round = 0; status === 200 && body.state === 'overview' && round < 2; round++) {
-    const overview = await overviewFiles(body.paths, { known: round === 0 ? (body.known ?? []) : [], maxFiles: body.maxFiles ?? 50, maxBytes: body.maxBytes ?? 256 * 1024 });
-    ({ status, body } = await call('/v1/config/sync', { ...request, overview }));
-  }
-  for (const w of body.warnings ?? []) console.log(`::warning title=Qualio config::${typeof w === 'string' ? w : `${w.key}: ${w.message}`}`);
-  const input = (process.env.BASE_URL_INPUT ?? '').trim().replace(/\/+$/, '');
-  if (status === 200 && input && typeof body.appUrl === 'string' && input !== body.appUrl.replace(/\/+$/, ''))
-    console.log(`::notice title=Qualio config::The workflow's base-url input (${input}) overrides the config's app.url (${body.appUrl}) in this job. Delete base-url from the workflow to use app.url.`);
-  if (status === 422) {
-    for (const p of body.problems ?? []) console.log(`::error title=Qualio config::${p.key}: ${p.message}`);
-    throw new Error(`The Qualio config in ${source === 'inline' ? 'the workflow' : source} is invalid (see the errors above). Nothing was changed in Qualio.`);
-  }
-  if (status !== 200 || body.state !== 'synced') throw new Error(`Qualio could not read the config (${status}): ${body.error ?? 'unknown error'}`);
-
-  console.log(`::group::Qualio config (${source === 'inline' ? 'qualio.yml' : source})`);
-  console.log(body.message);
-  for (const c of body.changes ?? []) console.log(`  ${c.label}: ${c.from} → ${c.to} (${c.when === 'now' ? 'on this branch now' : `when merged${c.why === 'looser' ? ', looser' : ''}`})`);
-  console.log('::endgroup::');
-  const lines = ['### Qualio config', '', body.message];
-  if (body.changes?.length)
-    lines.push(
-      '',
-      '| Setting | From | To | Applies |',
-      '| --- | --- | --- | --- |',
-      ...body.changes.map((c) => `| ${cell(c.label)} | ${cell(c.from)} | ${cell(c.to)} | ${c.when === 'now' ? 'On this branch now' : c.why === 'looser' ? 'When merged (looser)' : 'When merged'} |`),
-    );
-  await summary(lines);
-  await output({ scope: String(body.scope).toLowerCase() });
-}
 
 // ── Auto-sharding (specs/auto-sharding.md) ───────────────────────────────────────────────────────
 
@@ -1234,7 +1136,7 @@ async function errored(conclusion) {
  * exports E2E_<ROLE>_PASSWORD for the later steps (the map, the tests, the look-only browser). A variable the
  * job already sets (a per-role secret in its env) wins. Never prints a password, nor a line it can't read.
  */
-// `${NAME}` or `${NAME:-default}` in a value of qualio.yml's users or api (@qualio/shared's CONFIG_VARIABLE).
+// `${NAME}` or `${NAME:-default}` in a value Qualio answers for the test accounts and APIs (@qualio/shared's CONFIG_VARIABLE).
 const CONFIG_VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
 const EXPORT_NAME = /^(?:E2E_[A-Z0-9_]+_(?:USERNAME|PASSWORD)|QUALIO_API_[A-Z0-9_]+)$/;
 
@@ -1253,21 +1155,16 @@ function resolveTemplate(template, env, json = false) {
 }
 
 /**
- * The test accounts and APIs for this job (phase 77): Qualio reads the config's users and api and answers the
- * variables to export (E2E_<ROLE>_USERNAME/_PASSWORD, QUALIO_API_<NAME>_*), as the config writes them. Each
- * ${NAME} is read here from the job's environment (the workflow sets it from a GitHub secret), so the value never
- * leaves the job. Secrets are masked; a variable the job already sets wins. Then QUALIO_TEST_PASSWORDS (older
- * workflows) fills the roles still without a password.
+ * The test accounts and APIs for this job: Qualio answers the variables to export (E2E_<ROLE>_USERNAME/_PASSWORD,
+ * QUALIO_API_<NAME>_*) from the project's Settings, with secrets as ${NAME}. Each ${NAME} is read here from the
+ * job's environment (the workflow sets it from a GitHub secret), so the value never leaves the job. Secrets are
+ * masked; a variable the job already sets wins. Then QUALIO_TEST_PASSWORDS (older workflows) fills the roles still
+ * without a password.
  */
 async function accounts() {
-  const { raw } = await readConfig().catch((error) => {
-    console.log(`::warning title=Qualio::${error.message}`);
-    return { raw: '' };
-  });
-  if (raw.trim() && apiKey && apiUrl) {
-    const { status, body } = await call('/v1/config/resolve', { raw });
-    if (status === 422) console.log(`::warning title=Qualio::The Qualio config is invalid, so its users and APIs were not read: ${(body.problems ?? []).map((p) => `${p.key} ${p.message}`).join('; ')}`);
-    else if (status !== 200) console.log(`::warning title=Qualio::Reading the users and APIs from Qualio failed (${status}): ${body.error ?? 'unknown error'}`);
+  if (apiKey && apiUrl) {
+    const { status, body } = await call('/v1/config/resolve', {});
+    if (status !== 200) console.log(`::warning title=Qualio::Reading the users and APIs from Qualio failed (${status}): ${body.error ?? 'unknown error'}`);
     else {
       const lines = [];
       const done = [];
@@ -1286,7 +1183,7 @@ async function accounts() {
         done.push(item.env);
       }
       if (lines.length && process.env.GITHUB_ENV) await appendFile(process.env.GITHUB_ENV, lines.join(''));
-      console.log(`From the config's users and api: ${done.join(', ') || 'nothing to export'}.`);
+      console.log(`From the test accounts and APIs in Qualio: ${done.join(', ') || 'nothing to export'}.`);
     }
   }
   await passwords();
@@ -1322,6 +1219,8 @@ const isMain = (() => {
 if (isMain) {
   const [command, ...args] = process.argv.slice(2);
   // `setup`: the name of the map step before phase 54.
+  // config: qualio.yml is gone (phase 83); older workflows' step does nothing.
+  const config = async () => console.log("Qualio's settings live in Qualio now: the config input is ignored. You can remove it from the workflow.");
   const commands = { map, setup: map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
   if (!commands[command]) {
     console.error(`Unknown command "${command}". Use map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
