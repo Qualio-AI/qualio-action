@@ -6,7 +6,6 @@
 import { appendFile, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { deliver } from './github.mjs';
-import { runHost } from './host.mjs';
 import { readTests, testsDir } from './inventory.mjs';
 
 const env = process.env;
@@ -106,6 +105,35 @@ async function jobWork(jobId, status) {
   await work.handle(status.ask, { jobId, call, env });
 }
 
+/** Hosted mode: Qualio runs on its own browsers; this job only asks, waits and posts the report. */
+export async function hosted() {
+  if (!apiKey || !apiUrl) throw new Error('Set api-key (the QUALIO_API_KEY secret) and api-url.');
+  const event = await githubEvent();
+  const pr = event.pull_request ?? null;
+  const started = await call('/v1/runs/hosted', {
+    event: pr ? 'pull_request' : env.GITHUB_EVENT_NAME === 'push' ? 'push' : 'manual',
+    branch: pr?.head?.ref ?? (env.GITHUB_REF_NAME || ''),
+    sha: pr?.head?.sha ?? (env.GITHUB_SHA || ''),
+    url: env.QUALIO_HOSTED_URL || null,
+    bashMinutes: Number(env.QUALIO_BASH_MINUTES || 10),
+    pr: pr ? { number: pr.number, title: pr.title ?? '', body: pr.body ?? '', branch: pr.head?.ref ?? '', baseBranch: pr.base?.ref ?? '', headSha: pr.head?.sha ?? '', url: pr.html_url ?? null, authorLogin: pr.user?.login ?? null, state: pr.merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'open', mergeCommitSha: pr.merged ? (pr.merge_commit_sha ?? null) : null } : null,
+  });
+  if (started.status !== 200) throw new Error(`Qualio refused the run (${started.status}): ${started.body.error ?? 'unknown error'}`);
+  let status = { state: started.body.state ?? 'STARTED' };
+  const deadline = Date.now() + Number(env.QUALIO_JOB_MINUTES || 60) * 60_000;
+  let said = '';
+  while (started.body.jobId && Date.now() < deadline) {
+    const r = await call(`/v1/runs/hosted/${started.body.jobId}/status`);
+    if (r.status === 200) status = r.body;
+    if (status.message && status.message !== said) console.log((said = status.message));
+    if (status.state === 'DONE' || status.state === 'ERRORED') break;
+    await sleep(Number(env.QUALIO_POLL_MS || 10_000));
+  }
+  await outbox(pr?.number);
+  await summary(['## Qualio', status.summary ?? status.message ?? 'Qualio’s run ended.', ...(status.url ? [`[Open it in Qualio](${status.url})`] : [])]);
+  return status.result === 'failed' ? 1 : 0;
+}
+
 export async function main() {
   if (!apiKey || !apiUrl) throw new Error('Set api-key (the QUALIO_API_KEY secret) and api-url.');
   const event = await githubEvent();
@@ -134,6 +162,8 @@ export async function main() {
     const sent = await call('/v1/tests/inventory', { branch: pr?.head?.ref ?? (env.GITHUB_REF_NAME || ''), files });
     if (sent.status === 200) console.log(`Qualio read your ${sent.body.tests ?? 0} tests in ${files.length} files.`);
   }
+  // Loaded here: the hosted action runs without the browser host's dependencies.
+  const { runHost } = await import('./host.mjs');
   const { chromium } = await import('@playwright/test');
   const host = runHost({ relay: relayUrl, token, launchServer: (options) => chromium.launchServer(options) });
   const deadline = Date.now() + Number(env.QUALIO_JOB_MINUTES || 60) * 60_000;
@@ -161,7 +191,7 @@ export async function main() {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
-  main()
+  (process.argv[2] === 'hosted' ? hosted() : main())
     .then((code) => process.exit(code))
     .catch(async (error) => {
       console.log(`::error title=Qualio::${error.message}`);
