@@ -54,6 +54,7 @@ const calls = [];
 // The shards a plan job's plan gave (the Test workflow's shard jobs start their own stub: test/shard-fixture's split).
 const plans = { p1: mode === 'shards' ? [['tests/one.spec.ts'], ['tests/two.spec.ts']] : [['tests/a.spec.ts', 'tests/c.spec.ts'], ['tests/b.spec.ts']] };
 let healPolls = 0;
+let hostedPolls = 0;
 // "cli": the answers the CLI sent the Analyst, and how often it asked for the feature's state.
 const cliReplies = [];
 let cliPolls = 0;
@@ -275,6 +276,15 @@ http
     // The tests folder: test/heal-fixture (its test fails until the heal); "empty" names one that doesn't exist.
     if (req.url === '/v1/tests/prepare')
       return res.end(JSON.stringify({ testsDir: mode === 'empty' ? 'e2e-none-yet' : mode === 'move' ? 'e2e-moving' : mode === 'shards' ? 'test/shard-fixture' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review', ...(mode === 'config' && { config: 'test/heal-fixture/playwright.config.mjs' }), ...(mode === 'app-url' && { env: { QUALIO_BASE_URL: 'http://localhost:8080/app' } }), ...(mode === 'email' && { env: { QUALIO_MAIL: 'mailpit', QUALIO_MAIL_URL: 'http://localhost:8025', QUALIO_MAIL_DOMAIN: 'school.test', QUALIO_MAIL_API_KEY: 'never-from-qualio', PATH: '/nope' } }) }));
+    // Hosted runs (the hosted action): the run starts, is running once, then done ("hosted-fail": it failed).
+    if (req.url === '/v1/runs/hosted')
+      return res.end(JSON.stringify(body.event === 'pull_request' && body.action === 'closed' && !body.pr?.merged ? { state: 'skipped', reason: 'closed without merging' } : { state: 'queued', jobId: 'h1', branch: body.branch, statusUrl: '/v1/runs/hosted/h1/status', projectUrl: 'http://stub.test/p' }));
+    if (req.url === '/v1/runs/hosted/h1/status') {
+      hostedPolls += 1;
+      if (hostedPolls < 2) return res.end(JSON.stringify({ state: 'running', runs: [] }));
+      const failed = mode === 'hosted-fail';
+      return res.end(JSON.stringify({ state: 'done', result: failed ? 'failed' : 'passed', summary: { total: 4, passed: failed ? 3 : 4, flaky: 0 }, reportUrl: 'http://stub.test/runs/r1', healed: !failed, needsDecision: failed ? 1 : 0, possibleBugs: 0, runs: [] }));
+    }
     // The tests Qualio keeps for the branch: a fixture folder's files ("empty": none yet).
     if (req.url === '/v1/tests/bundle') {
       if (mode === 'empty') return res.writeHead(404).end(JSON.stringify({ error: 'Qualio has no tests for this project yet.' }));

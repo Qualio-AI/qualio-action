@@ -9,8 +9,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-test('no expression in an input or output description, and none but github in input defaults', async () => {
-  const yml = await readFile(path.join(root, 'action.yml'), 'utf8');
+for (const file of ['action.yml', 'hosted/action.yml']) {
+test(`${file}: no expression in an input or output description, and none but github in input defaults`, async () => {
+  const yml = await readFile(path.join(root, file), 'utf8');
   const head = yml.slice(0, yml.search(/^runs:/m));
   const problems = [];
   for (const [i, line] of head.split('\n').entries()) {
@@ -25,8 +26,8 @@ test('no expression in an input or output description, and none but github in in
 // A plain (unquoted) YAML value can't contain ': ' or ' #': GitHub then fails to load action.yml for every
 // workflow ("Mapping values are not allowed in this context"), as live-diagnosis's description did from
 // v1.7.2 to v1.8.0. Quote such a description.
-test('no unquoted input or output description that YAML would read as a mapping or a comment', async () => {
-  const yml = await readFile(path.join(root, 'action.yml'), 'utf8');
+test(`${file}: no unquoted input or output description that YAML would read as a mapping or a comment`, async () => {
+  const yml = await readFile(path.join(root, file), 'utf8');
   const head = yml.slice(0, yml.search(/^runs:/m));
   const problems = head
     .split('\n')
@@ -35,3 +36,4 @@ test('no unquoted input or output description that YAML would read as a mapping 
     .map(([n]) => `line ${n}: quote this description`);
   assert.deepEqual(problems, []);
 });
+}

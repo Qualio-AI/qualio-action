@@ -639,6 +639,67 @@ async function outbox(waitMinutes = '0') {
  * The comment job: tells Qualio about a new comment on a pull request (a reply to the Analyst, or a
  * `/qualio accept|bug|run` command). Comments on issues, by bots, or Qualio's own are skipped.
  */
+/**
+ * A project whose tests Qualio runs (the hosted action, `qualio-ai/qualio-action/hosted`): tells Qualio about
+ * this event (a pull request is synced like the test job's would), starts the run against `QUALIO_PREVIEW_URL`
+ * (a preview deploy) or the project's URL, and waits for it. The job fails unless the run passed.
+ */
+async function hosted(waitMinutes = '30') {
+  const eventName = process.env.GITHUB_EVENT_NAME ?? '';
+  let event = {};
+  try {
+    if (process.env.GITHUB_EVENT_PATH) event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
+  } catch {}
+  const pr = /^pull_request/.test(eventName) ? event.pull_request : null;
+  const branch = pr?.head?.ref ?? process.env.GITHUB_HEAD_REF ?? process.env.GITHUB_REF_NAME ?? '';
+  const url = (process.env.QUALIO_PREVIEW_URL ?? '').trim() || null;
+  const request = {
+    event: pr ? 'pull_request' : eventName === 'push' ? 'push' : 'manual',
+    action: pr ? event.action : undefined,
+    branch,
+    sha: pr?.head?.sha ?? process.env.GITHUB_SHA ?? null,
+    url,
+    pr: pr
+      ? { number: pr.number, title: pr.title ?? '', body: pr.body ?? null, url: pr.html_url, baseBranch: pr.base?.ref, merged: Boolean(pr.merged), mergeCommitSha: pr.merge_commit_sha ?? null, author: pr.user?.login ?? null }
+      : null,
+  };
+  const start = await call('/v1/runs/hosted', request);
+  if (start.status !== 200) throw new Error(`Qualio could not start the run (${start.status}): ${start.body.error ?? 'unknown error'}`);
+  if (start.body.state === 'skipped') {
+    console.log(`Nothing to run: ${start.body.reason}.`);
+    return output({ result: 'skipped' });
+  }
+  console.log(`Qualio is running the tests for ${start.body.branch}${url ? ` against ${url}` : ''}.`);
+  const deadline = Date.now() + Number(waitMinutes) * 60_000;
+  let status;
+  let said = '';
+  for (;;) {
+    const answer = await call(start.body.statusUrl, {});
+    if (answer.status !== 200) throw new Error(`Reading the run's status failed (${answer.status}): ${answer.body.error ?? 'unknown error'}`);
+    status = answer.body;
+    if (status.state !== said) console.log(status.state === 'queued' ? 'Waiting for a Qualio runner…' : status.state === 'running' ? 'The tests are running in Qualio…' : 'Done.');
+    said = status.state;
+    if (status.state === 'done') break;
+    if (Date.now() >= deadline) throw new Error(`The run didn't finish within ${waitMinutes} minutes. It goes on in Qualio: ${start.body.projectUrl}`);
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+  const s = status.summary ?? {};
+  const counts = s.total !== undefined ? `${(s.passed ?? 0) + (s.flaky ?? 0)} of ${s.total} tests passed` : 'no results';
+  const lines = [
+    `### Qualio: ${status.result === 'passed' ? '✅ the tests passed' : status.result === 'failed' ? '❌ the tests failed' : '⚠️ the run ended without results'}`,
+    '',
+    `${counts}${status.healed ? '. Qualio healed the tests and ran them again.' : '.'}`,
+    ...(status.needsDecision ? [`${status.needsDecision} change${status.needsDecision === 1 ? '' : 's'} need${status.needsDecision === 1 ? 's' : ''} a decision in Qualio.`] : []),
+    ...(status.possibleBugs ? [`${status.possibleBugs} possible bug${status.possibleBugs === 1 ? '' : 's'} found.`] : []),
+    ...(status.error ? [status.error] : []),
+    ...(status.reportUrl ? ['', `[Open the run in Qualio](${status.reportUrl})`] : []),
+  ];
+  console.log(lines.filter((l) => !l.startsWith('[') && l).join('\n'));
+  await summary(lines);
+  await output({ result: status.result, 'report-url': status.reportUrl ?? '' });
+  if (status.result !== 'passed') throw new Error(`The tests ${status.result === 'failed' ? 'failed' : 'ended without results'} in Qualio${status.reportUrl ? `: ${status.reportUrl}` : '.'}`);
+}
+
 async function comment() {
   if (process.env.GITHUB_EVENT_NAME !== 'issue_comment') return;
   const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
@@ -859,9 +920,9 @@ if (isMain) {
   // `setup`: the name of the map step before phase 54.
   // config: qualio.yml is gone (phase 83); older workflows' step does nothing.
   const config = async () => console.log("Qualio's settings live in Qualio now: the config input is ignored. You can remove it from the workflow.");
-  const commands = { map, setup: map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard };
+  const commands = { map, setup: map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard, hosted };
   if (!commands[command]) {
-    console.error(`Unknown command "${command}". Use map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan or shard.`);
+    console.error(`Unknown command "${command}". Use map, accounts, passwords, prepare, apply, wait, look, sync, config, outbox, errored, comment, plan, shard or hosted.`);
     process.exit(2);
   }
   commands[command](...args).catch((error) => {

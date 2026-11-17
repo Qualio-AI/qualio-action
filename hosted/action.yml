@@ -1,0 +1,63 @@
+name: Qualio AI (tests run in Qualio)
+description: For projects whose tests Qualio runs. Tells Qualio about this pull request or push, has it run the tests against your preview or staging URL, waits for the result and fails the job unless they passed.
+author: Qualio AI
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  api-key:
+    description: The Project API Key (store it as the QUALIO_API_KEY secret).
+    required: true
+  api-url:
+    description: Qualio's URL.
+    default: https://app.qualio-ai.com
+  url:
+    description: Optional. Where this branch's app answers, such as a pull request's preview deploy (it must be reachable from the internet). Empty uses the application URL in Qualio's Settings.
+    default: ''
+  wait-minutes:
+    description: How long the job waits for the run, in minutes. The run goes on in Qualio after that.
+    default: '30'
+  github-token:
+    description: The token that posts Qualio's pull request report and status. Empty sends nothing.
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: passed, failed, errored, or skipped (a pull request closed without merging).
+    value: ${{ steps.run.outputs.result }}
+  report-url:
+    description: The run's report in Qualio.
+    value: ${{ steps.run.outputs.report-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run the tests in Qualio
+      id: run
+      continue-on-error: true
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        QUALIO_PREVIEW_URL: ${{ inputs.url }}
+        WAIT_MINUTES: ${{ inputs.wait-minutes }}
+      run: node "$GITHUB_ACTION_PATH/../scripts/qualio.mjs" hosted "$WAIT_MINUTES"
+
+    # Qualio's report on the pull request and its status, sent with this job's token (Qualio never calls GitHub).
+    - name: Send Qualio's GitHub updates
+      if: ${{ !cancelled() && inputs.github-token != '' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: node "$GITHUB_ACTION_PATH/../scripts/qualio.mjs" outbox 0
+
+    - name: Result
+      if: steps.run.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "The tests didn't pass in Qualio (see the summary above)."
+        exit 1
