@@ -7,6 +7,7 @@ import { appendFile, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { deliver } from './github.mjs';
 import { runHost } from './host.mjs';
+import { readTests, testsDir } from './inventory.mjs';
 
 const env = process.env;
 const apiUrl = (env.QUALIO_API_URL ?? '').replace(/\/+$/, '');
@@ -125,6 +126,14 @@ export async function main() {
   if (started.status !== 200) throw new Error(`Qualio refused the run (${started.status}): ${started.body.error ?? 'unknown error'}`);
   const { jobId, token, relayUrl, accounts } = started.body;
   exportAccounts(accounts);
+  // Your own tests: their titles tell Qualio which spec cases are covered already.
+  const root = env.GITHUB_WORKSPACE || process.cwd();
+  const dir = await testsDir(root, env.QUALIO_TESTS_DIR);
+  if (dir) {
+    const files = await readTests(root, dir);
+    const sent = await call('/v1/tests/inventory', { branch: pr?.head?.ref ?? (env.GITHUB_REF_NAME || ''), files });
+    if (sent.status === 200) console.log(`Qualio read your ${sent.body.tests ?? 0} tests in ${files.length} files.`);
+  }
   const { chromium } = await import('@playwright/test');
   const host = runHost({ relay: relayUrl, token, launchServer: (options) => chromium.launchServer(options) });
   const deadline = Date.now() + Number(env.QUALIO_JOB_MINUTES || 60) * 60_000;

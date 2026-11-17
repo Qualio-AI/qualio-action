@@ -17,3 +17,18 @@ test('exports test users’ passwords from the job’s secrets and names the mis
   assert.equal(target.E2E_ADMIN_PASSWORD, 's3cret');
   assert.deepEqual(missing, ['TEACHER_PASSWORD']);
 });
+
+test('finds the customer’s tests from playwright.config’s testDir', async () => {
+  const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { readTests, testsDir } = await import('../scripts/inventory.mjs');
+  const root = await mkdtemp(path.join(tmpdir(), 'inv-'));
+  await writeFile(path.join(root, 'playwright.config.ts'), "export default { testDir: './e2e' }");
+  await mkdir(path.join(root, 'e2e', 'node_modules'), { recursive: true });
+  await writeFile(path.join(root, 'e2e', 'students.spec.ts'), "test('adds a student', async () => {})");
+  await writeFile(path.join(root, 'e2e', 'node_modules', 'x.spec.ts'), '');
+  const dir = await testsDir(root);
+  assert.deepEqual((await readTests(root, dir)).map((f) => f.path), ['e2e/students.spec.ts']);
+  assert.equal(await testsDir(await mkdtemp(path.join(tmpdir(), 'none-'))), null);
+});
