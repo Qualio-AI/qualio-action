@@ -22,10 +22,10 @@ inputs:
     description: Deprecated and ignored.
     default: ''
   working-directory:
-    description: Deprecated and ignored. The tests folder is set in Qualio's Settings (e2e by default).
+    description: Only without an api-key, the folder of Playwright tests to run, unreported (default e2e). With Qualio, the tests are the ones Qualio keeps for the project.
     default: ''
   api-key:
-    description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, results are not reported (and tests-source qualio can't download the tests).
+    description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, the tests Qualio keeps can't be downloaded and results are not reported.
     required: true
   api-url:
     description: The Qualio URL that results are reported to (the generated workflow sets it).
@@ -212,8 +212,8 @@ runs:
         QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" map "$RUNNER_TEMP/qualio-map" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WAIT_MINUTES"
 
-    # The tests folder (the folder of the Playwright config in Qualio's Settings): a snapshot goes to Qualio for its agents, and the changes
-    # Qualio offers on this branch (verified fixes, new tests) are written on top, so they run here too.
+    # The tests Qualio keeps for this branch (the main tests, with a pull request's own version on top), written
+    # into a folder of the job's own: the repository is never read or changed.
     - name: Prepare the tests
       id: tests
       if: steps.check.outputs.closed != 'true'
@@ -339,8 +339,7 @@ runs:
         QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
       run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" wait "$RUNNER_TEMP/qualio-run.json" "$WAIT_MINUTES"
 
-    # The fix is written into this checkout only (never committed by the job): the re-run proves it,
-    # and Qualio then suggests it on the pull request. Reported to Qualio as round 2.
+    # The tests again from Qualio, now with the fix: the re-run proves it. Reported to Qualio as round 2.
     - name: Run the healed tests again
       id: rerun
       if: steps.heal.outputs.status == 'patched'

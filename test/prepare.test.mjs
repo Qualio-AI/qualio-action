@@ -1,10 +1,9 @@
-// Preparing the tests: the folder qualio.yml names is sent as a snapshot (hashes first, contents when
-// Qualio asks), the changes Qualio offers are written on top with the run manifest, and a project whose
-// tests Qualio still keeps gets the whole folder when the checkout has none. Runs against test/stub-qualio.mjs.
+// Preparing the tests (phase 84): the tests Qualio keeps for the branch are written into a folder of the job's
+// own with the run manifest and Qualio's reporter; the checkout is never read or changed. Runs against
+// test/stub-qualio.mjs.
 //   node --test test/*.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,106 +40,63 @@ async function workspace() {
   return dir;
 }
 
-const run = (url, ws, args) => {
+const run = (url, ws, args, extra = {}) => {
   const outputs = path.join(ws, 'outputs.txt');
   const log = execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), ...args], {
     encoding: 'utf8',
-    env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: outputs, QUALIO_RUN_MANIFEST: path.join(ws, 'manifest.json'), QUALIO_COMMIT_SHA: 'abc1234' },
+    env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: outputs, RUNNER_TEMP: ws, QUALIO_RUN_MANIFEST: path.join(ws, 'manifest.json'), QUALIO_COMMIT_SHA: 'abc1234', ...extra },
   });
   return { log, outputs };
 };
 
-test('sends the tests folder and writes the changes Qualio offers on top', async () => {
-  const url = await stub('healed');
-  const ws = await workspace();
-  const tests = path.join(ws, 'test/heal-fixture');
-  await mkdir(path.join(tests, 'tests'), { recursive: true });
-  await mkdir(path.join(tests, 'node_modules/x'), { recursive: true });
-  await writeFile(path.join(tests, 'package.json'), '{}');
-  await writeFile(path.join(tests, 'playwright.config.ts'), 'export default {};');
-  await writeFile(path.join(tests, 'tests/login.spec.ts'), 'old');
-  await writeFile(path.join(tests, 'node_modules/x/index.js'), 'not a test');
-
-  const { log, outputs } = run(url, ws, ['prepare', 'feature/sch-9']);
-  const calls = await (await fetch(`${url}/__calls`)).json();
-  const snapshots = calls.filter((c) => c.route === '/v1/tests/snapshot');
-  assert.equal(snapshots.length, 2);
-  assert.deepEqual(snapshots[0].body.files.map((f) => [f.path, 'content' in f]), [
-    ['package.json', false],
-    ['playwright.config.ts', false],
-    ['tests/login.spec.ts', false],
-  ]);
-  assert.equal(snapshots[1].body.files.find((f) => f.path === 'tests/login.spec.ts').content, 'old');
-  assert.equal(snapshots[0].body.testsDir, 'test/heal-fixture');
-  assert.equal(snapshots[0].body.headSha, 'abc1234');
-  // The stub's snapshot answer has no changes; the changes route has the fix (healed).
-  assert.match(await readFile(outputs, 'utf8'), /run=true\ndir=.*test\/heal-fixture/);
-  // The team's own config doesn't list Qualio's reporter: the run adds it (with list and HTML).
-  assert.match(await readFile(outputs, 'utf8'), new RegExp(`reporter-args=--reporter=list,html,${tests.replace(/[/\\.]/g, '\\$&')}/\\.qualio/qualio-reporter\\.ts`));
-  assert.match(log, /doesn't list Qualio's reporter/);
-  assert.match(await readFile(path.join(tests, '.qualio/qualio-reporter.ts'), 'utf8'), /class QualioReporter/);
-  assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')), { bundleId: 'repo', revisionIds: [] });
-  assert.doesNotMatch(log, /Applied/);
-
-  run(url, ws, ['apply', tests, 'feature/sch-9', 'repo']);
-  assert.match(await readFile(path.join(tests, 'tests/login.spec.ts'), 'utf8'), /name: 'Log in'/);
-  assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')), { bundleId: 'repo', revisionIds: ['r2'] });
-});
-
-test('binary files travel as a description, and Qualio never writes over them', async () => {
+test("writes the tests Qualio keeps into a folder of the job's own, never the checkout", async () => {
   const url = await stub('binary');
   const ws = await workspace();
-  const tests = path.join(ws, 'test/heal-fixture');
-  await mkdir(path.join(tests, 'fixtures'), { recursive: true });
-  await writeFile(path.join(tests, 'package.json'), '{}');
-  await writeFile(path.join(tests, 'playwright.config.ts'), 'export default {};');
-  const workbook = await readFile(path.join(root, 'test/data/students.xlsx'));
-  await writeFile(path.join(tests, 'fixtures/students.xlsx'), workbook);
-  await writeFile(path.join(tests, 'fixtures/logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]));
-  await writeFile(path.join(tests, 'fixtures/notes.txt'), 'plain text');
-
-  const { log } = run(url, ws, ['prepare', 'feature/import']);
+  const { log, outputs } = run(url, ws, ['prepare', 'feature/sch-9']);
+  const dir = path.join(ws, 'qualio-tests');
+  const out = await readFile(outputs, 'utf8');
+  assert.ok(out.includes(`run=true\ndir=${dir}\n`), out);
+  assert.match(out, /mode=bundle/);
+  assert.match(await readFile(path.join(dir, 'tests/login.spec.ts'), 'utf8'), /name: 'Sign in'/);
+  // An attached binary test file is written as its bytes.
+  assert.deepEqual([...(await readFile(path.join(dir, 'fixtures/attached.xlsx')))], [0x50, 0x4b, 3, 4, 0, 0xff]);
+  // Qualio's reporter goes next to the tests; the manifest says which revisions ran.
+  assert.ok(out.includes(`reporter=${path.join(dir, '.qualio/qualio-reporter.ts')}`), out);
+  assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')), { bundleId: 'b_1', revisionIds: ['m1'] });
+  assert.match(log, /of the tests Qualio keeps for feature\/sch-9/);
+  // Nothing is read from or sent about the repository.
   const calls = await (await fetch(`${url}/__calls`)).json();
-  const sent = calls.filter((c) => c.route === '/v1/tests/snapshot')[1].body.files;
-  const xlsx = sent.find((f) => f.path === 'fixtures/students.xlsx').content;
-  assert.equal(
-    xlsx,
-    `[qualio:binary] Excel workbook, ${workbook.length} bytes, sha256 ${createHash('sha256').update(workbook).digest('hex')}\n` +
-      "Not sent to Qualio. Tests read it with fixtureFile('fixtures/students.xlsx') from support/files; Qualio never changes it.\n" +
-      'Sheet "Export": 3 rows\n  1: Name | Email | Grade\n  2: Jane Doe | jane@x.com | 9\n  3: Li, Wei |  | Grade 10\n',
-  );
-  assert.match(sent.find((f) => f.path === 'fixtures/logo.png').content, /^\[qualio:binary\] PNG image, 12 bytes, sha256 [0-9a-f]{64}\n/);
-  assert.equal(sent.find((f) => f.path === 'fixtures/notes.txt').content, 'plain text');
-  // The hash is the description's: what Qualio stores is what it was sent; the bytes' hash goes with it.
-  assert.equal(sent.find((f) => f.path === 'fixtures/students.xlsx').sha256, createHash('sha256').update(xlsx).digest('hex'));
-  assert.equal(sent.find((f) => f.path === 'fixtures/students.xlsx').bytesSha256, createHash('sha256').update(workbook).digest('hex'));
-  assert.equal(sent.find((f) => f.path === 'fixtures/notes.txt').bytesSha256, undefined);
-  assert.equal(calls.find((c) => c.route === '/v1/tests/snapshot').body.binary, true);
-  // A binary file Qualio adds (base64) is written as its bytes; what this action couldn't get is a warning.
-  assert.deepEqual(await readFile(path.join(tests, 'fixtures/attached.xlsx')), Buffer.from([0x50, 0x4b, 3, 4, 0, 0xff]));
-  assert.match(log, /::warning title=Qualio::Qualio has the test file fixtures\/other\.pdf/);
-
-  assert.match(log, /fixtures\/students\.xlsx is a binary file: Qualio's change to it was not applied/);
-  assert.deepEqual(await readFile(path.join(tests, 'fixtures/students.xlsx')), workbook);
-  assert.equal(await readFile(path.join(tests, 'fixtures/notes.txt'), 'utf8'), 'changed');
+  assert.deepEqual(calls.map((c) => c.route), ['/v1/tests/prepare', '/v1/tests/bundle']);
+  assert.equal(calls[1].body.binary, true);
 });
 
-test('a project whose tests Qualio still keeps runs them from Qualio while the move waits', async () => {
-  const url = await stub('move');
+test('after a heal, gets the tests again with the fix and keeps the installed dependencies', async () => {
+  const url = await stub('healed');
   const ws = await workspace();
-  const { log, outputs } = run(url, ws, ['prepare', 'main']);
-  assert.match(log, /now live in your repository/);
-  assert.match(await readFile(outputs, 'utf8'), /mode=move/);
-  assert.match(await readFile(path.join(ws, 'e2e-moving/tests/moved.spec.ts'), 'utf8'), /Log in/);
-  assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')), { bundleId: 'move', revisionIds: ['m1'] });
+  run(url, ws, ['prepare', 'main']);
+  const dir = path.join(ws, 'qualio-tests');
+  await mkdir(path.join(dir, 'node_modules/x'), { recursive: true });
+  await writeFile(path.join(dir, 'node_modules/x/index.js'), 'kept');
+  run(url, ws, ['apply', dir, 'main']);
+  assert.match(await readFile(path.join(dir, 'tests/login.spec.ts'), 'utf8'), /name: 'Log in'/);
+  assert.equal(await readFile(path.join(dir, 'node_modules/x/index.js'), 'utf8'), 'kept');
+  assert.deepEqual(JSON.parse(await readFile(path.join(ws, 'manifest.json'), 'utf8')).revisionIds, ['m1', 'r2']);
 });
 
 test('no tests yet: the job has nothing to run, with a notice instead of a failure', async () => {
   const url = await stub('empty');
   const ws = await workspace();
   const { log, outputs } = run(url, ws, ['prepare', 'main']);
-  assert.match(log, /::notice title=Qualio::There are no tests in 'e2e-none-yet' yet/);
   assert.match(await readFile(outputs, 'utf8'), /run=false/);
+  assert.match(log, /::notice title=Qualio::Qualio has no tests for this project yet/);
+});
+
+test('says when it cannot check which merged pull requests the commit includes', async () => {
+  const url = await stub('lacking');
+  const ws = await workspace();
+  const { log } = run(url, ws, ['prepare', 'feature/x']);
+  // No git history in this folder: the latest tests are used.
+  assert.match(log, /Could not check which merged pull requests this commit includes/);
 });
 
 test('without Qualio (no api-key), a missing tests folder fails with the path', async () => {
@@ -178,14 +134,14 @@ test("exports the email setup Qualio answers for the steps that run the tests, n
   const envFile = path.join(ws, 'env.txt');
   const log = execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'prepare', 'main'], {
     encoding: 'utf8',
-    env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt'), GITHUB_ENV: envFile, QUALIO_RUN_MANIFEST: path.join(ws, 'manifest.json'), QUALIO_COMMIT_SHA: 'abc1234', QUALIO_MAIL_DOMAIN: 'mine.test' },
+    env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt'), GITHUB_ENV: envFile, RUNNER_TEMP: ws, QUALIO_RUN_MANIFEST: path.join(ws, 'manifest.json'), QUALIO_COMMIT_SHA: 'abc1234', QUALIO_MAIL_DOMAIN: 'mine.test' },
   });
   // The job's own QUALIO_MAIL_DOMAIN wins; an API key or PATH from Qualio is never exported.
   assert.equal(await readFile(envFile, 'utf8'), 'QUALIO_MAIL=mailpit\nQUALIO_MAIL_URL=http://localhost:8025\n');
   assert.match(log, /The tests read email from mailpit \(http:\/\/localhost:8025\)/);
 });
 
-test("exports the config's app.url as QUALIO_BASE_URL, unless the job (the base-url input) set one", async () => {
+test("exports the app URL Qualio answers as QUALIO_BASE_URL, unless the job (the base-url input) set one", async () => {
   const url = await stub('app-url');
   const ws = await workspace();
   const tests = path.join(ws, 'test/heal-fixture');
@@ -196,7 +152,7 @@ test("exports the config's app.url as QUALIO_BASE_URL, unless the job (the base-
   const prepare = (envFile, extra = {}) =>
     execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'prepare', 'main'], {
       encoding: 'utf8',
-      env: { ...process.env, QUALIO_BASE_URL: '', QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt'), GITHUB_ENV: envFile, QUALIO_RUN_MANIFEST: path.join(ws, 'manifest.json'), QUALIO_COMMIT_SHA: 'abc1234', ...extra },
+      env: { ...process.env, QUALIO_BASE_URL: '', QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt'), GITHUB_ENV: envFile, RUNNER_TEMP: ws, QUALIO_RUN_MANIFEST: path.join(ws, 'manifest.json'), QUALIO_COMMIT_SHA: 'abc1234', ...extra },
     });
   const fromConfig = path.join(ws, 'env-config.txt');
   assert.match(prepare(fromConfig), /The app's URL in this job: http:\/\/localhost:8080\/app/);
@@ -206,7 +162,7 @@ test("exports the config's app.url as QUALIO_BASE_URL, unless the job (the base-
   assert.equal(await readFile(fromInput, 'utf8').catch(() => ''), '');
 });
 
-test("the map step exports the config's app.url before mapping", async () => {
+test("the map step exports the app URL Qualio answers before mapping", async () => {
   const url = await stub('app-url');
   const ws = await workspace();
   const envFile = path.join(ws, 'env.txt');
@@ -215,27 +171,4 @@ test("the map step exports the config's app.url before mapping", async () => {
     env: { ...process.env, QUALIO_BASE_URL: '', QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws, GITHUB_OUTPUT: path.join(ws, 'outputs.txt'), GITHUB_ENV: envFile },
   });
   assert.equal(await readFile(envFile, 'utf8'), 'QUALIO_BASE_URL=http://localhost:8080/app\n');
-});
-
-test("runs with the Playwright config qualio.yml's tests.config names (phase 76)", async () => {
-  const url = await stub('config');
-  const ws = await workspace();
-  const tests = path.join(ws, 'test/heal-fixture');
-  await mkdir(path.join(tests, 'tests'), { recursive: true });
-  await writeFile(path.join(tests, 'package.json'), '{}');
-  await writeFile(path.join(tests, 'tests/login.spec.ts'), 'old');
-  // Only the named config counts: without it, the folder isn't the tests folder.
-  await writeFile(path.join(tests, 'playwright.config.ts'), 'export default {};');
-  assert.throws(
-    () => execFileSync(process.execPath, [path.join(root, 'scripts/qualio.mjs'), 'prepare', 'main'], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, QUALIO_API_URL: url, QUALIO_API_KEY: 'qk_stub', GITHUB_WORKSPACE: ws } }),
-    (error) => /has no package\.json and playwright\.config\.mjs\. Is tests\.config \(test\/heal-fixture\/playwright\.config\.mjs\) your Playwright config/.test(`${error.stdout}${error.stderr}`),
-  );
-
-  // The named config lists Qualio's reporter: the run adds none, and names the config.
-  await writeFile(path.join(tests, 'playwright.config.mjs'), 'export default { reporter: [[process.env.QUALIO_REPORTER]] };');
-  const { outputs } = run(url, ws, ['prepare', 'main']);
-  const out = await readFile(outputs, 'utf8');
-  assert.match(out, /config=playwright\.config\.mjs/);
-  assert.match(out, /reporter-args=\n/);
-  assert.match(out, /run=true/);
 });

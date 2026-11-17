@@ -1,7 +1,7 @@
 // A stand-in for Qualio's CI API, to check the action end to end without a Qualio server.
-// The tests live in the repository: test/heal-fixture has a test that fails on a renamed button; once
-// the heal is "patched", /v1/tests/changes serves the fixed test, which the action writes on top of the
-// checkout for the re-run. GET /__calls lists the requests received.
+// Qualio keeps the tests (phase 84): /v1/tests/bundle serves test/heal-fixture's files, whose test fails on a
+// renamed button; once the heal is "patched", it serves the fixed test for the re-run. GET /__calls lists the
+// requests received.
 //
 // It also answers the pull request sync and the GitHub outbox (empty unless "outbox" or "changes"), and
 // stands in for the GitHub REST calls the outbox makes (/repos/...), for local runs with GITHUB_API_URL set to it.
@@ -18,7 +18,10 @@
 //     ends not_healable; GET /__browser lists the host's answers; "shards": the plan splits the tests
 //     over two jobs)
 import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const port = Number(process.argv[2] || 4555);
 const propose = process.argv[3] === 'propose';
@@ -140,6 +143,22 @@ const shardingChange = () => ({
   qualioPr: null,
 });
 
+/** A fixture folder's files (relative paths), as Qualio would serve them. */
+function fixtureFiles(name) {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), name);
+  const out = [];
+  const visit = (rel) => {
+    for (const entry of readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.') || entry.name === 'test-results' || entry.name === 'playwright-report') continue;
+      const child = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) visit(child);
+      else out.push({ path: child, content: readFileSync(path.join(dir, child), 'utf8') });
+    }
+  };
+  visit('');
+  return out;
+}
+
 const pkg = { path: 'package.json', content: JSON.stringify({ name: 'qualio-e2e', private: true, devDependencies: { '@playwright/test': '1.64.1' } }, null, 2) };
 
 // The mapper the action runs: one test that "maps" a page and tells the stub it's done.
@@ -256,6 +275,16 @@ http
     // The tests folder: test/heal-fixture (its test fails until the heal); "empty" names one that doesn't exist.
     if (req.url === '/v1/tests/prepare')
       return res.end(JSON.stringify({ testsDir: mode === 'empty' ? 'e2e-none-yet' : mode === 'move' ? 'e2e-moving' : mode === 'shards' ? 'test/shard-fixture' : 'test/heal-fixture', managed: true, moving: mode === 'move', suggestions: 'review', ...(mode === 'config' && { config: 'test/heal-fixture/playwright.config.mjs' }), ...(mode === 'app-url' && { env: { QUALIO_BASE_URL: 'http://localhost:8080/app' } }), ...(mode === 'email' && { env: { QUALIO_MAIL: 'mailpit', QUALIO_MAIL_URL: 'http://localhost:8025', QUALIO_MAIL_DOMAIN: 'school.test', QUALIO_MAIL_API_KEY: 'never-from-qualio', PATH: '/nope' } }) }));
+    // The tests Qualio keeps for the branch: a fixture folder's files ("empty": none yet).
+    if (req.url === '/v1/tests/bundle') {
+      if (mode === 'empty') return res.writeHead(404).end(JSON.stringify({ error: 'Qualio has no tests for this project yet.' }));
+      const files = fixtureFiles(mode === 'shards' ? 'shard-fixture' : 'heal-fixture');
+      if (healed || healedNow) files.find((f) => f.path === 'tests/login.spec.ts').content = spec('Log in');
+      if (mode === 'binary') files.push({ path: 'fixtures/attached.xlsx', content: Buffer.from([0x50, 0x4b, 3, 4, 0, 0xff]).toString('base64'), encoding: 'base64' });
+      // "lacking": a recent merge the job's commit doesn't contain (an unknown commit: not counted without history).
+      const merges = mode === 'lacking' && !body.lacking ? [{ number: 41, sha: 'f'.repeat(40) }] : [];
+      return res.end(JSON.stringify({ bundleId: healed || healedNow ? 'b_healed' : 'b_1', revisionIds: healed || healedNow ? ['m1', 'r2'] : ['m1'], files, notices: [], pending: [], merges, lacking: body.lacking ?? [] }));
+    }
     if (req.url === '/v1/tests/snapshot') {
       // The contents travel only when asked for (here: always, the first time).
       if (body.files.some((f) => f.content === undefined) && !body.files.some((f) => f.content !== undefined))

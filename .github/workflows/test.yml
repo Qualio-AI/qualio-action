@@ -15,8 +15,8 @@ jobs:
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
           ./actionlint -color
 
-  # The diff helpers, the tests folder's snapshot, the setup's config, and the outbox (report, suggestions,
-  # the Qualio pull request) against the stub Qualio and GitHub.
+  # Preparing the tests, the accounts, live diagnosis, sharding and the outbox (report, statuses) against
+  # the stub Qualio and GitHub.
   scripts:
     runs-on: ubuntu-latest
     steps:
@@ -61,9 +61,9 @@ jobs:
           OUTCOME: ${{ steps.action.outcome }}
         run: test "$OUTCOME" = failure
 
-  # Tests in the repository against a stub Qualio API: test/heal-fixture's test fails on a renamed
-  # button, the stub reports the heal as patched, the action writes the fix on top of the checkout and
-  # the re-run passes, in the same job.
+  # The tests Qualio keeps, against a stub Qualio API: the stub serves test/heal-fixture's files, whose test
+  # fails on a renamed button; it reports the heal as patched and serves the fix, and the re-run passes in
+  # the same job. The checkout is never changed.
   heal:
     runs-on: ubuntu-latest
     steps:
@@ -87,9 +87,10 @@ jobs:
           test "$OUTCOME" = success
           test "$HEAL" = patched
           test "$RUN_URL" = http://stub.test/runs/run_2
-          grep -q "name: 'Log in'" test/heal-fixture/tests/login.spec.ts
+          grep -q "name: 'Log in'" "$RUNNER_TEMP/qualio-tests/tests/login.spec.ts"
+          grep -q "name: 'Sign in'" test/heal-fixture/tests/login.spec.ts
           routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r.startsWith('/v1/tests/') || r === '/v1/map/start').join(' ')")
-          test "$routes" = "/v1/map/start /v1/tests/prepare /v1/tests/snapshot /v1/tests/snapshot /v1/tests/heal/status /v1/tests/heal/status /v1/tests/changes"
+          test "$routes" = "/v1/map/start /v1/tests/prepare /v1/tests/bundle /v1/tests/heal/status /v1/tests/heal/status /v1/tests/bundle"
 
   # Auto-sharding (specs/auto-sharding.md): the plan job lists test/shard-fixture's two files with
   # Playwright and the stub splits them over two jobs; each job runs its one file and nothing else.
@@ -155,7 +156,7 @@ jobs:
           grep -q "1 passed" "$RUNNER_TEMP/qualio-playwright.log"
 
   # A project with no map yet: the job maps the app with Qualio's mapper first (no tests are generated),
-  # then runs the repository's tests as usual.
+  # then runs the tests Qualio keeps as usual.
   map:
     runs-on: ubuntu-latest
     steps:
@@ -184,8 +185,7 @@ jobs:
           routes=$(curl -fs http://localhost:4555/__calls | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).map((c) => c.route).filter((r) => r.startsWith('/v1/map/') || r === '/v1/tests/prepare').join(' ')")
           test "$routes" = "/v1/map/start /v1/map/c1/mapped /v1/map/c1/status /v1/tests/prepare"
 
-  # No tests yet (tests.path names a folder that doesn't exist, and Qualio has nothing to write): the
-  # job passes with a notice and runs nothing.
+  # No tests yet (Qualio has none for the project): the job passes with a notice and runs nothing.
   empty:
     runs-on: ubuntu-latest
     steps:
@@ -206,7 +206,6 @@ jobs:
         run: |
           test "$OUTCOME" = success
           test -z "$VERSION"
-          test ! -e e2e-none-yet
 
   # The comment job (command: comment) never installs or runs tests, nor tells Qualio a pull request
   # closed; outside an issue_comment event it relays nothing.
