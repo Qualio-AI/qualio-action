@@ -1,0 +1,61 @@
+name: Qualio Basher
+description: Qualio tests your pull request against the app this job starts - the tests it keeps for your features, your own Playwright tests and a bash of the new feature - and reports on the pull request. Its agents use this job's browsers; your app and passwords never leave the job.
+author: Qualio AI
+branding:
+  icon: check-circle
+  color: purple
+
+inputs:
+  api-key:
+    description: The project API key (Settings → API keys), stored as the QUALIO_API_KEY secret.
+    required: true
+  api-url:
+    description: Qualio's address (the served workflow sets it).
+    required: true
+  base-url:
+    description: Where this job's app answers.
+    default: http://localhost:3000
+  tests-command:
+    description: How your own Playwright tests run (they run as regression; empty when you have none).
+    default: npx playwright test
+  tests-dir:
+    description: The folder your own Playwright tests are in (default: found from playwright.config.*).
+    default: ''
+  bash-minutes:
+    description: How long the bash of the pull request's features may take (0 skips it).
+    default: '10'
+  job-minutes:
+    description: How long the job waits for Qualio at most.
+    default: '60'
+  github-token:
+    description: Posts Qualio's report and statuses on the pull request (the workflow needs pull-requests and statuses write).
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: passed, failed or neutral.
+    value: ${{ steps.qualio.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    - name: Install Qualio's runner
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
+    - name: Qualio
+      id: qualio
+      shell: bash
+      env:
+        QUALIO_API_KEY: ${{ inputs.api-key }}
+        QUALIO_API_URL: ${{ inputs.api-url }}
+        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_TESTS_COMMAND: ${{ inputs.tests-command }}
+        QUALIO_TESTS_DIR: ${{ inputs.tests-dir }}
+        QUALIO_BASH_MINUTES: ${{ inputs.bash-minutes }}
+        QUALIO_JOB_MINUTES: ${{ inputs.job-minutes }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: node "${{ github.action_path }}/scripts/qualio.mjs"
