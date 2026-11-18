@@ -115,7 +115,6 @@ export async function hosted() {
     branch: pr?.head?.ref ?? (env.GITHUB_REF_NAME || ''),
     sha: pr?.head?.sha ?? (env.GITHUB_SHA || ''),
     url: env.QUALIO_HOSTED_URL || null,
-    bashMinutes: Number(env.QUALIO_BASH_MINUTES || 10),
     pr: pr ? { number: pr.number, title: pr.title ?? '', body: pr.body ?? '', branch: pr.head?.ref ?? '', baseBranch: pr.base?.ref ?? '', headSha: pr.head?.sha ?? '', url: pr.html_url ?? null, authorLogin: pr.user?.login ?? null, state: pr.merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'open', mergeCommitSha: pr.merged ? (pr.merge_commit_sha ?? null) : null } : null,
   });
   if (started.status !== 200) throw new Error(`Qualio refused the run (${started.status}): ${started.body.error ?? 'unknown error'}`);
@@ -149,7 +148,6 @@ export async function main() {
     sha: pr?.head?.sha ?? (env.GITHUB_SHA || ''),
     baseUrl: env.QUALIO_BASE_URL || 'http://localhost:3000',
     pr: pr?.number ?? null,
-    bashMinutes: Number(env.QUALIO_BASH_MINUTES || 10),
   });
   if (started.status !== 200) throw new Error(`Qualio refused the run (${started.status}): ${started.body.error ?? 'unknown error'}`);
   const { jobId, token, relayUrl, accounts } = started.body;

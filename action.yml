@@ -1,5 +1,5 @@
 name: Qualio Basher
-description: Qualio tests your pull request against the app this job starts - the tests it keeps for your features, your own Playwright tests and a bash of the new feature - and reports on the pull request. Its agents use this job's browsers; your app and passwords never leave the job.
+description: Qualio tests your pull request against the app this job starts - the tests it keeps for your features and your own Playwright tests - and reports on the pull request. Its agents use this job's browsers; your app and passwords never leave the job.
 author: Qualio AI
 branding:
   icon: check-circle
@@ -22,8 +22,8 @@ inputs:
     description: The folder your own Playwright tests are in (default: found from playwright.config.*).
     default: ''
   bash-minutes:
-    description: How long the bash of the pull request's features may take (0 skips it).
-    default: '10'
+    description: Deprecated and ignored. The pull request run no longer bashes; start an exploratory run or a bug bash from the app instead.
+    default: '0'
   job-minutes:
     description: How long the job waits for Qualio at most.
     default: '60'
@@ -55,7 +55,6 @@ runs:
         QUALIO_BASE_URL: ${{ inputs.base-url }}
         QUALIO_TESTS_COMMAND: ${{ inputs.tests-command }}
         QUALIO_TESTS_DIR: ${{ inputs.tests-dir }}
-        QUALIO_BASH_MINUTES: ${{ inputs.bash-minutes }}
         QUALIO_JOB_MINUTES: ${{ inputs.job-minutes }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
       run: node "${{ github.action_path }}/scripts/qualio.mjs"

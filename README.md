@@ -5,7 +5,6 @@ Runs Qualio on your pull requests from your own GitHub Actions job. Your job sta
 - links the pull request to the features it names (`SCH-9`, `F-3` in its title, description or branch);
 - maps your app and walks the new features' test cases, then writes the Playwright tests their specs describe;
 - runs every test (your own and Qualio's) and self-heals the flaky and drifted ones;
-- bashes on the new features to find what nobody thought to test;
 - posts one report comment and the `qualio/tests` status on the pull request.
 
 Qualio's agents run at Qualio; **their browsers run in your job**, next to your app, through an outbound WebSocket

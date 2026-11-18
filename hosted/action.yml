@@ -16,8 +16,8 @@ inputs:
     description: The preview deploy's URL for this pull request (empty: the staging environment chosen in Qualio).
     default: ''
   bash-minutes:
-    description: How long the bash of the pull request's features may take (0 skips it).
-    default: '10'
+    description: Deprecated and ignored. The pull request run no longer bashes; start an exploratory run or a bug bash from the app instead.
+    default: '0'
   job-minutes:
     description: How long to wait for Qualio at most.
     default: '60'
@@ -37,7 +37,6 @@ runs:
         QUALIO_API_KEY: ${{ inputs.api-key }}
         QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_HOSTED_URL: ${{ inputs.url }}
-        QUALIO_BASH_MINUTES: ${{ inputs.bash-minutes }}
         QUALIO_JOB_MINUTES: ${{ inputs.job-minutes }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
       # The hosted action needs no dependencies: Node's fetch only.
