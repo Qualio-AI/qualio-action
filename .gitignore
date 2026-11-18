@@ -1,6 +1,2 @@
-node_modules
-test-results
-playwright-report
-.DS_Store
-.env
-.qualio
+node_modules/
+test-results/

@@ -2,16 +2,17 @@
   "name": "@qualio-ai/qualio-action",
   "version": "0.0.0",
   "private": true,
-  "description": "The Qualio AI GitHub Action: runs the E2E tests Qualio keeps for your application in your CI and reports the results.",
+  "description": "The Qualio GitHub Action (v2): runs Qualio's tests for your pull request, lends Qualio's agents browsers next to the app your job starts, and reports on the pull request.",
   "license": "UNLICENSED",
+  "type": "module",
   "engines": {
     "node": ">=20"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Qualio-AI/qualio-action.git"
-  },
   "scripts": {
     "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@playwright/test": "1.64.1",
+    "ws": "8.18.0"
   }
 }

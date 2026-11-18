@@ -1,508 +1,68 @@
-name: Qualio E2E
-description: Run your repository's Playwright E2E tests with Qualio AI - results, failure artifacts and self-healing, with Qualio's fixes suggested on your pull requests. The first run also maps the application, and Qualio reads your tests to learn which features they cover.
+name: Qualio
+description: Qualio tests your pull request against the app this job starts - the tests it keeps for your features, run in this job, and your own Playwright tests - and reports on the pull request. Its agents use this job's browsers; your app and passwords never leave the job.
 author: Qualio AI
 branding:
   icon: check-circle
   color: purple
 
 inputs:
-  command:
-    description: What the job does. "test" (default) runs the tests. "plan" (the workflow's plan job) tells Qualio about the pull request, then asks how many jobs run the tests (outputs run, shards and plan-id for the e2e job's matrix). "comment" (the workflow's comment job, on issue_comment) only tells Qualio about a new pull request comment, then posts Qualio's answer.
-    default: test
-  shard:
-    description: In a sharded workflow's e2e job, this job's shard (matrix.shard from the plan job's shards output). Empty runs every test in this job.
-    default: ''
-  shard-plan:
-    description: In a sharded workflow's e2e job, the plan job's plan-id output (which files each shard runs).
-    default: ''
-  reply-wait-minutes:
-    description: With command comment, how long to wait for Qualio's answer (the Analyst's reply) before leaving it for the next job.
-    default: '3'
-  tests-source:
-    description: Deprecated and ignored.
-    default: ''
-  working-directory:
-    description: Only without an api-key, the folder of Playwright tests to run, unreported (default e2e). With Qualio, the tests are the ones Qualio keeps for the project.
-    default: ''
   api-key:
-    description: The Project API Key (store it as the QUALIO_API_KEY secret). Without it, the tests Qualio keeps can't be downloaded and results are not reported.
+    description: The project API key (Settings → API keys), stored as the QUALIO_API_KEY secret.
     required: true
   api-url:
-    description: The Qualio URL that results are reported to (the generated workflow sets it).
+    description: Qualio's address (the served workflow sets it).
     required: true
   base-url:
-    description: Optional. Overrides the app URL in Qualio's Settings (where the app runs in this job, default http://localhost:3000), e.g. for a preview deploy whose address changes per pull request.
+    description: Where this job's app answers.
+    default: http://localhost:3000
+  tests-command:
+    description: How your own Playwright tests run (they run as regression; empty when you have none).
+    default: npx playwright test
+  tests-dir:
+    description: The folder your own Playwright tests are in (default: found from playwright.config.*).
     default: ''
-  config:
-    description: Deprecated and ignored. Qualio's settings live in Qualio (Settings); remove this input from the workflow.
+  bash-minutes:
+    description: Deprecated and ignored. The pull request run no longer bashes; start an exploratory run or a bug bash from the app instead.
+    default: '0'
+  shard:
+    description: This job's part of a matrix that splits the tests, as i/n (the served workflow sets it from matrix.shard; empty is 1/1).
     default: ''
-  config-file:
-    description: Deprecated and ignored. Qualio's settings live in Qualio (Settings); remove this input from the workflow.
+  workers:
+    description: How many tests run at once in this job (a number, or a share of its cores such as 50%; empty is 50%).
     default: ''
-  commit-sha:
-    description: The commit the results belong to.
-    default: ${{ github.event.pull_request.head.sha || github.sha }}
-  setup-wait-minutes:
-    description: How long mapping the application may take when Qualio asks a job to map it (the project's first job, or after someone asked to map it again), exploration included. The tests run after it either way.
-    default: '25'
-  heal-wait-minutes:
-    description: How long to wait for Qualio to heal failed tests before giving up on the re-run.
-    default: '10'
-  live-diagnosis:
-    description: 'While Qualio diagnoses failed tests (and while it explores the map), let it look at the running app from this job ("true" or "false"). The job opens the pages Qualio asks for (on the app''s origin only: app.url, or base-url, signed in with the role''s E2E_<ROLE>_* secrets, which never leave the job) with Playwright MCP and sends back their accessibility snapshots; nothing is clicked or filled in. Qualio never reaches the app itself.'
-    default: 'true'
-  test-passwords:
-    description: "Deprecated: give each test account's password its own repository secret named after the role (ADMIN_PASSWORD), set in the workflow's env. The test accounts' passwords, one Role=password line per role (e.g. Admin=s3cret), from the repository secret QUALIO_TEST_PASSWORDS; they fill the roles still without a password. Each is masked and exported as E2E_<ROLE>_PASSWORD. A per-role secret the job's env sets wins. Passwords never leave the job."
-    default: ''
-  look-minutes:
-    description: At the end of a job, how long it may keep the running app open for a test chat in Qualio that asked to look at it (with live-diagnosis on; the chat started this workflow on the branch). The job opens only the pages the chat asks for, as with live diagnosis, and stops as soon as the chat is done. 0 turns it off. Keep it within the job's timeout-minutes.
-    default: '10'
-  node-version:
-    description: The Node.js version to run the tests with.
-    default: '20'
-  upload-report:
-    description: Keep Playwright's HTML report as a workflow artifact ("true" or "false").
-    default: 'true'
-  report-retention-days:
-    description: Days to keep the HTML report artifact.
-    default: '14'
+  job-minutes:
+    description: How long the job waits for Qualio at most.
+    default: '60'
   github-token:
-    description: The token that sends Qualio's pull request report, suggestions, statuses, labels and re-runs (Qualio never calls GitHub itself), and pushes Qualio's own qualio/* branch for its pull request into yours. The workflow needs `permissions` contents, pull-requests, issues, statuses and actions write for them. Empty sends nothing.
+    description: Posts Qualio's report and statuses on the pull request (the workflow needs pull-requests and statuses write).
     default: ${{ github.token }}
 
 outputs:
-  playwright-version:
-    description: The @playwright/test version installed in the tests folder.
-    value: ${{ steps.playwright.outputs.version }}
-  qualio-run-url:
-    description: The Qualio page of this run (of the re-run after a heal, when there was one). Empty when the results were not reported.
-    value: ${{ steps.summary.outputs.run-url }}
-  heal-status:
-    description: How healing a failed run ended (patched, proposed, declined, not_healable, stopped, failed, timeout, none). Empty when the tests passed or weren't run.
-    value: ${{ steps.heal.outputs.status }}
-  config-scope:
-    description: Deprecated, always empty (Qualio's settings live in Qualio).
-    value: ''
-  map-state:
-    description: Whether this job mapped the application (mapped, skipped = Qualio didn't ask, failed). Empty without an api-key.
-    value: ${{ steps.map.outputs.state }}
-  setup-state:
-    description: Deprecated (the first-suite setup is gone); always empty. See map-state.
-    value: ''
-  run:
-    description: With command plan, whether the e2e jobs have tests to run ("true" or "false").
-    value: ${{ steps.plan.outputs.run || 'false' }}
-  shards:
-    description: With command plan, the shards for the e2e job's matrix, as a JSON list (e.g. [1,2,3]).
-    value: ${{ steps.plan.outputs.shards || '[1]' }}
-  plan-id:
-    description: With command plan, the plan the e2e jobs pass as shard-plan (also when it is one job, so Qualio knows the workflow is sharded). Empty when there is no plan (Playwright couldn't list the tests, or Qualio couldn't plan).
-    value: ${{ steps.plan.outputs.plan-id }}
+  result:
+    description: passed, failed or neutral.
+    value: ${{ steps.qualio.outputs.result }}
 
 runs:
   using: composite
   steps:
-    # Fail early with a readable message. Only whether the key is set reaches this step, never the key.
-    - name: Check the inputs
-      id: check
-      shell: bash
-      env:
-        TESTS_SOURCE: ${{ inputs.tests-source }}
-        HAS_API_KEY: ${{ inputs.api-key != '' }}
-        HAS_API_URL: ${{ inputs.api-url != '' }}
-        EVENT_NAME: ${{ github.event_name }}
-        EVENT_ACTION: ${{ github.event.action }}
-        COMMAND: ${{ inputs.command }}
-      run: |
-        rm -f "$RUNNER_TEMP/qualio-playwright.log" "$RUNNER_TEMP/qualio-run.json" "$RUNNER_TEMP/qualio-manifest.json"
-        # When this job started (the runner's worker process), for the setup time a shard plan weighs.
-        worker=$(pgrep -f Runner.Worker | head -n 1 || true)
-        elapsed=$( [ -n "$worker" ] && ps -o etimes= -p "$worker" 2>/dev/null | tr -d ' ' || true)
-        echo "started-at=$(( $(date +%s) - ${elapsed:-0} ))" >> "$GITHUB_OUTPUT"
-        if [ -n "$TESTS_SOURCE" ]; then
-          echo "::notice title=Qualio::tests-source is no longer used. Remove the input."
-        fi
-        if [ "$COMMAND" = "comment" ] && { [ "$HAS_API_KEY" != "true" ] || [ "$HAS_API_URL" != "true" ]; }; then
-          echo "::error title=Qualio::The comment job needs api-key and api-url. Add the QUALIO_API_KEY repository secret."
-          exit 1
-        fi
-        if [ "$HAS_API_KEY" != "true" ] || [ "$HAS_API_URL" != "true" ]; then
-          echo "::warning title=Qualio::api-key or api-url is empty: the tests run, but results are not reported to Qualio and failures are not self-healed. Add the QUALIO_API_KEY repository secret."
-        fi
-        # The comment job only relays a comment. A closed pull request has nothing to test, and neither has
-        # Qualio's own pull request into a branch (qualio/*): they only tell Qualio about it.
-        if [ "$COMMAND" = "comment" ]; then
-          echo "closed=true" >> "$GITHUB_OUTPUT"
-          echo "comment=true" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        case "${GITHUB_HEAD_REF:-}" in
-          qualio/*) echo "closed=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
-        esac
-        if [ "$EVENT_NAME" = "pull_request" ] && [ "$EVENT_ACTION" = "closed" ]; then
-          echo "closed=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "closed=false" >> "$GITHUB_OUTPUT"
-        fi
-
-    # The test accounts and APIs (Qualio's Settings): each password or token is read from this job's env (set
-    # from GitHub secrets), masked and exported for the steps that sign in or call APIs; values never reach
-    # Qualio. Then QUALIO_TEST_PASSWORDS (older workflows) fills the roles still without a password.
-    - name: Read the test accounts and APIs
-      if: (inputs.test-passwords != '' || inputs.api-key != '') && steps.check.outputs.closed != 'true' && inputs.command != 'comment' && inputs.command != 'plan'
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_TEST_PASSWORDS: ${{ inputs.test-passwords }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" accounts
-
-    # Qualio follows pull requests through this job (title, description, branch, head, merged); it
-    # never reads the repository. Never fails the job.
-    - name: Tell Qualio about the pull request
-      if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && inputs.command != 'comment' && inputs.shard == '' && inputs.api-key != '' && inputs.api-url != ''
-      continue-on-error: true
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" sync
-
-    # The comment job: a reply to the Analyst or a /qualio command, relayed to Qualio (no checkout).
-    - name: Tell Qualio about the comment
-      if: steps.check.outputs.comment == 'true'
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" comment
-
-    # The report, statuses, labels, re-runs and Qualio's changes to the tests (suggestions, its pull
-    # request into this branch) Qualio queued for GitHub, sent with this job's token.
-    - name: Send Qualio's GitHub updates
-      if: inputs.shard == '' && inputs.api-key != '' && inputs.api-url != '' && inputs.github-token != ''
-      continue-on-error: true
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        GITHUB_TOKEN: ${{ inputs.github-token }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" outbox
-
     - uses: actions/setup-node@v4
-      if: steps.check.outputs.closed != 'true'
       with:
-        node-version: ${{ inputs.node-version }}
-
-    # When Qualio asks (the project's first job, or after someone asked to map it again), the app (started
-    # by an earlier step of the job) is mapped here: the map is knowledge Qualio's agents read. It
-    # generates no tests and never fails the job. Test account secrets come from the job's env.
-    - name: Map the application
-      id: map
-      # The plan job has no app; in a sharded run the first shard maps.
-      if: steps.check.outputs.closed != 'true' && inputs.command != 'plan' && (inputs.shard == '' || inputs.shard == '1') && inputs.api-key != '' && inputs.api-url != ''
-      continue-on-error: true
+        node-version: '20'
+    - name: Install Qualio's runner
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
+    - name: Qualio
+      id: qualio
       shell: bash
       env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
         QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
-        WAIT_MINUTES: ${{ inputs.setup-wait-minutes }}
-        # The job hosts a browser while Qualio explores the map (off with live-diagnosis: false).
-        QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" map "$RUNNER_TEMP/qualio-map" "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WAIT_MINUTES"
-
-    # The tests Qualio keeps for this branch (the main tests, with a pull request's own version on top), written
-    # into a folder of the job's own: the repository is never read or changed.
-    - name: Prepare the tests
-      id: tests
-      if: steps.check.outputs.closed != 'true'
-      shell: bash
-      env:
         QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
-        QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
-        WORKING_DIRECTORY: ${{ inputs.working-directory }}
-        # Set when the base-url input (or an earlier step) set it: else Qualio's app.url is exported for the tests.
-        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" prepare "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$WORKING_DIRECTORY"
-
-    - name: Install dependencies
-      if: steps.tests.outputs.run == 'true'
-      shell: bash
-      working-directory: ${{ steps.tests.outputs.dir }}
-      # A workflow that installed the dependencies itself (a pnpm or yarn monorepo, whose workspace: versions
-      # npm can't install) keeps them: the action installs only when @playwright/test doesn't resolve yet.
-      run: |
-        if node -e "require.resolve('@playwright/test/package.json')" >/dev/null 2>&1; then
-          echo "The tests' dependencies are already installed (@playwright/test resolves): not installing them again."
-        elif [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
-
-    - name: Read the Playwright version
-      id: playwright
-      if: steps.tests.outputs.run == 'true'
-      shell: bash
-      working-directory: ${{ steps.tests.outputs.dir }}
-      run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-
-    - name: Cache Playwright browsers
-      id: browsers
-      if: steps.tests.outputs.run == 'true' && inputs.command != 'plan'
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/ms-playwright
-        key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium
-
-    - name: Install Chromium
-      if: steps.tests.outputs.run == 'true' && inputs.command != 'plan'
-      shell: bash
-      working-directory: ${{ steps.tests.outputs.dir }}
-      run: |
-        if [ "${{ steps.browsers.outputs.cache-hit }}" = "true" ]; then
-          npx playwright install-deps chromium
-        else
-          npx playwright install --with-deps chromium
-        fi
-
-    # The plan job (specs/auto-sharding.md): Playwright lists the tests (Qualio's changes included) and
-    # Qualio splits them across jobs by their past durations. Without a plan, one job runs every test.
-    - name: Plan the jobs that run the tests
-      id: plan
-      if: inputs.command == 'plan' && steps.tests.outputs.run == 'true'
-      shell: bash
-      working-directory: ${{ steps.tests.outputs.dir }}
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
-        QUALIO_PLAYWRIGHT_CONFIG: ${{ steps.tests.outputs.config }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" plan "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" .
-
-    # A shard job runs only its files from the plan.
-    - name: Pick this shard's tests
-      id: shard
-      if: inputs.command != 'plan' && steps.tests.outputs.run == 'true' && inputs.shard != ''
-      shell: bash
-      working-directory: ${{ steps.tests.outputs.dir }}
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        SHARD: ${{ inputs.shard }}
-        SHARD_PLAN: ${{ inputs.shard-plan }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" shard "$SHARD_PLAN" "$SHARD" . "$RUNNER_TEMP/qualio-shard-args.txt"
-
-    # Qualio's reporter (from this action, QUALIO_REPORTER) reads these. Test account secrets
-    # (E2E_<ROLE>_USERNAME / _PASSWORD) come from the calling job's env.
-    # The output is also kept in a log so the summary can link to the Qualio run.
-    # (shell: bash runs with pipefail, so a failing test still fails the step.)
-    # A failure doesn't stop the job here: the heal and re-run steps decide.
-    - name: Run Playwright tests
-      id: test
-      if: steps.tests.outputs.run == 'true' && inputs.command != 'plan'
-      continue-on-error: true
-      shell: bash
-      working-directory: ${{ steps.tests.outputs.dir }}
-      run: |
-        shard_args=()
-        if [ -s "$RUNNER_TEMP/qualio-shard-args.txt" ]; then mapfile -t shard_args < "$RUNNER_TEMP/qualio-shard-args.txt"; fi
-        npx playwright test ${QUALIO_PLAYWRIGHT_CONFIG:+"--config=$QUALIO_PLAYWRIGHT_CONFIG"} ${QUALIO_REPORTER_ARGS:+"$QUALIO_REPORTER_ARGS"} "${shard_args[@]}" 2>&1 | tee "$RUNNER_TEMP/qualio-playwright.log"
-      env:
-        # A sharded run (specs/auto-sharding.md): the reporter reports this shard into the run's one Qualio run.
-        QUALIO_SHARD_INDEX: ${{ inputs.shard }}
-        QUALIO_SHARD_TOTAL: ${{ steps.shard.outputs.total }}
-        QUALIO_SHARD_PLAN: ${{ inputs.shard-plan }}
-        QUALIO_JOB_STARTED_AT: ${{ steps.check.outputs.started-at }}
-        # A team's own playwright.config doesn't list Qualio's reporter: prepare says how to add it.
-        QUALIO_REPORTER_ARGS: ${{ steps.tests.outputs.reporter-args }}
-        # The Playwright config Qualio's Settings name (empty: Playwright finds it).
-        QUALIO_PLAYWRIGHT_CONFIG: ${{ steps.tests.outputs.config }}
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
-        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
-        QUALIO_RUN_FILE: ${{ runner.temp }}/qualio-run.json
-        QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
-        QUALIO_REPORTER: ${{ steps.tests.outputs.reporter }}
-
-    - name: Wait for Qualio to heal the failures
-      id: heal
-      if: steps.test.outcome == 'failure'
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        WAIT_MINUTES: ${{ inputs.heal-wait-minutes }}
-        # Live diagnosis: the app's URL and the tests folder (whose Playwright Chromium the browser host uses).
-        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
-        QUALIO_TESTS_DIR: ${{ steps.tests.outputs.dir }}
-        QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" wait "$RUNNER_TEMP/qualio-run.json" "$WAIT_MINUTES"
-
-    # The tests again from Qualio, now with the fix: the re-run proves it. Reported to Qualio as round 2.
-    - name: Run the healed tests again
-      id: rerun
-      if: steps.heal.outputs.status == 'patched'
-      shell: bash
-      working-directory: ${{ steps.tests.outputs.dir }}
-      run: |
-        node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" apply . "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$MODE"
-        shard_args=()
-        if [ -s "$RUNNER_TEMP/qualio-shard-args.txt" ]; then mapfile -t shard_args < "$RUNNER_TEMP/qualio-shard-args.txt"; fi
-        echo "::group::Re-run after Qualio's heal"
-        npx playwright test ${QUALIO_PLAYWRIGHT_CONFIG:+"--config=$QUALIO_PLAYWRIGHT_CONFIG"} ${QUALIO_REPORTER_ARGS:+"$QUALIO_REPORTER_ARGS"} "${shard_args[@]}" 2>&1 | tee -a "$RUNNER_TEMP/qualio-playwright.log"
-        echo "::endgroup::"
-      env:
-        QUALIO_SHARD_INDEX: ${{ inputs.shard }}
-        QUALIO_SHARD_TOTAL: ${{ steps.shard.outputs.total }}
-        QUALIO_SHARD_PLAN: ${{ inputs.shard-plan }}
-        MODE: ${{ steps.tests.outputs.mode }}
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
-        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
-        QUALIO_RUN_ROUND: '2'
-        QUALIO_RUN_MANIFEST: ${{ runner.temp }}/qualio-manifest.json
-        QUALIO_REPORTER: ${{ steps.tests.outputs.reporter }}
-        QUALIO_REPORTER_ARGS: ${{ steps.tests.outputs.reporter-args }}
-        QUALIO_PLAYWRIGHT_CONFIG: ${{ steps.tests.outputs.config }}
-
-    - uses: actions/upload-artifact@v4
-      if: ${{ !cancelled() && inputs.upload-report == 'true' && steps.tests.outputs.run == 'true' && inputs.command != 'plan' }}
-      with:
-        name: ${{ inputs.shard != '' && format('playwright-report-shard-{0}', inputs.shard) || 'playwright-report' }}
-        path: ${{ steps.tests.outputs.dir }}/playwright-report
-        retention-days: ${{ inputs.report-retention-days }}
-        if-no-files-found: ignore
-
-    - name: Summary
-      id: summary
-      if: ${{ !cancelled() && steps.check.outputs.closed != 'true' && inputs.command != 'plan' }}
-      shell: bash
-      env:
-        SHARD: ${{ inputs.shard }}
-        SHARD_TOTAL: ${{ steps.shard.outputs.total }}
-        FIRST: ${{ steps.test.outcome }}
-        RERUN: ${{ steps.rerun.outcome }}
-        HEAL: ${{ steps.heal.outputs.status }}
-        COMMIT_SHA: ${{ inputs.commit-sha }}
-        UPLOAD_REPORT: ${{ inputs.upload-report }}
-      run: |
-        log="$RUNNER_TEMP/qualio-playwright.log"
-        run_url=""
-        healing=""
-        if [ -f "$log" ]; then
-          run_url=$(sed -n 's/.*\[qualio\] Results reported: \(http[^[:space:]]*\).*/\1/p' "$log" | tail -n 1)
-          if grep -q '\[qualio\] Self-healing requested' "$log"; then healing=true; fi
-        fi
-        echo "run-url=$run_url" >> "$GITHUB_OUTPUT"
-        outcome="${RERUN:-$FIRST}"
-        case "$outcome" in
-          success) result="✅ Passed" ;;
-          failure) result="❌ Failed" ;;
-          skipped|"") result="⏭️ Not run" ;;
-          *) result="$outcome" ;;
-        esac
-        if [ -n "$RERUN" ] && [ "$RERUN" != "skipped" ]; then result="$result (after Qualio healed the tests)"; fi
-        {
-          echo "### Qualio E2E"
-          echo ""
-          echo "| | |"
-          echo "| --- | --- |"
-          echo "| Result | $result |"
-          if [ "${SHARD_TOTAL:-1}" -gt 1 ] 2>/dev/null; then echo "| Shard | $SHARD of $SHARD_TOTAL (Qualio records the run once every shard has reported) |"; fi
-          echo "| Commit | \`$COMMIT_SHA\` |"
-          if [ -n "$HEAL" ]; then echo "| Heal | $HEAL |"; fi
-          if [ -n "$run_url" ]; then
-            echo "| Qualio | [Open the run in Qualio]($run_url) |"
-          elif [ "$outcome" != "skipped" ] && [ -n "$outcome" ]; then
-            echo "| Qualio | Not reported (see the \`[qualio]\` lines in the test log) |"
-          fi
-          if [ "$UPLOAD_REPORT" = "true" ] && [ "$outcome" != "skipped" ] && [ -n "$outcome" ]; then
-            echo "| HTML report | The \`playwright-report\` artifact of this workflow run |"
-          fi
-          if [ "$RERUN" = "success" ]; then
-            echo ""
-            echo "Qualio fixed the tests and they pass with the fix in this job. Commit its suggestion on the pull request (or merge its pull request into this branch) to keep the tests in step."
-          elif [ -n "$healing" ] && [ -z "$HEAL" ]; then
-            echo ""
-            echo "Qualio is diagnosing the failures. Test drift is fixed and suggested on this pull request; real application bugs are reported, never healed."
-          elif [ "$HEAL" = "not_healable" ]; then
-            echo ""
-            echo "Qualio did not change the tests: the failures look like bugs in the application. See the run in Qualio."
-          elif [ "$HEAL" = "proposed" ]; then
-            echo ""
-            echo "The UI changed, and Qualio proposes a fix for the tests. In Qualio, accept the change (it is then suggested on this pull request) or mark it as a bug."
-          elif [ "$HEAL" = "declined" ]; then
-            echo ""
-            echo "This UI change was marked as a bug in Qualio, so the tests were not changed. Fix the application."
-          fi
-        } >> "$GITHUB_STEP_SUMMARY"
-
-    # The job failed before any results reached Qualio (dependencies, the tests didn't start…): the
-    # run shows as errored in Qualio at once.
-    - name: Tell Qualio the job failed
-      if: failure() && inputs.api-key != '' && inputs.api-url != '' && steps.check.outputs.closed != 'true' && steps.summary.outputs.run-url == ''
-      continue-on-error: true
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_COMMIT_SHA: ${{ inputs.commit-sha }}
-        QUALIO_SHARD_INDEX: ${{ inputs.shard }}
-        QUALIO_SHARD_TOTAL: ${{ steps.shard.outputs.total }}
-        QUALIO_SHARD_PLAN: ${{ inputs.shard-plan }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" errored failure
-
-    # Again at the end: what Qualio queued during this job (heal reports, regressions) goes out now.
-    - name: Send Qualio's GitHub updates (end of job)
-      if: ${{ !cancelled() && inputs.api-key != '' && inputs.api-url != '' && inputs.github-token != '' }}
-      continue-on-error: true
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
+        QUALIO_BASE_URL: ${{ inputs.base-url }}
+        QUALIO_TESTS_COMMAND: ${{ inputs.tests-command }}
+        QUALIO_TESTS_DIR: ${{ inputs.tests-dir }}
+        QUALIO_JOB_MINUTES: ${{ inputs.job-minutes }}
+        QUALIO_SHARD: ${{ inputs.shard }}
+        QUALIO_WORKERS: ${{ inputs.workers }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
-        # A sharded run's jobs end together: each claims what it sends.
-        QUALIO_SHARDED: ${{ steps.shard.outputs.total > 1 }}
-        # The comment job waits for Qualio's answer, so it's posted now rather than by the next job. A pull
-        # request's job waits (up to 2 minutes) only while Qualio reads that pull request, so one with
-        # nothing to test (the setup pull request, a CI or docs change) ends green instead of pending.
-        WAIT_MINUTES: ${{ steps.check.outputs.comment == 'true' && inputs.reply-wait-minutes || (startsWith(github.event_name, 'pull_request') && github.event.action != 'closed') && '2' || '0' }}
-        QUALIO_OUTBOX_PR: ${{ steps.check.outputs.comment != 'true' && startsWith(github.event_name, 'pull_request') && github.event.action != 'closed' }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" outbox "$WAIT_MINUTES"
-
-    # A test chat in Qualio may ask to look at the running app after a failed run's job is gone: Qualio
-    # starts this workflow on the branch, and at the end of its run the job hosts the look-only browser
-    # while the chat looks (one request when no chat asked).
-    - name: Let Qualio's test chat look at the app
-      if: ${{ !cancelled() && inputs.api-key != '' && inputs.api-url != '' && steps.check.outputs.closed != 'true' && steps.tests.outputs.run == 'true' && inputs.command != 'plan' && (inputs.shard == '' || inputs.shard == '1') && inputs.look-minutes != '0' }}
-      continue-on-error: true
-      shell: bash
-      env:
-        QUALIO_API_URL: ${{ inputs.api-url }}
-        QUALIO_API_KEY: ${{ inputs.api-key }}
-        QUALIO_BASE_URL: ${{ inputs.base-url || env.QUALIO_BASE_URL }}
-        QUALIO_TESTS_DIR: ${{ steps.tests.outputs.dir }}
-        QUALIO_LIVE_DIAGNOSIS: ${{ inputs.live-diagnosis }}
-        LOOK_MINUTES: ${{ inputs.look-minutes }}
-      run: node "$GITHUB_ACTION_PATH/scripts/qualio.mjs" look "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" "$LOOK_MINUTES"
-
-    # The job's result is the re-run's when there was one, else the first run's.
-    - name: Result
-      if: ${{ !cancelled() && steps.test.outcome == 'failure' }}
-      shell: bash
-      env:
-        RERUN: ${{ steps.rerun.outcome }}
-        HEAL: ${{ steps.heal.outputs.status }}
-        RUN_URL: ${{ steps.summary.outputs.run-url }}
-      run: |
-        if [ "$RERUN" = "success" ]; then
-          echo "The tests pass with Qualio's fix. Commit the suggestion so the tests stay in step."
-        elif [ "$HEAL" = "proposed" ]; then
-          echo "::error title=Qualio::Qualio proposes a fix: review it in Qualio${RUN_URL:+ ($RUN_URL)}. Accept the UI change (it is then suggested on this pull request) or mark it as a bug."
-          exit 1
-        else
-          echo "::error title=Qualio::The E2E tests failed. See the job summary and the run in Qualio."
-          exit 1
-        fi
+      run: node "${{ github.action_path }}/scripts/qualio.mjs"
