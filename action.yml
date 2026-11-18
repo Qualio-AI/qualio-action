@@ -1,5 +1,5 @@
 name: Qualio
-description: Qualio tests your pull request against the app this job starts - the tests it keeps for your features, run in this job, and your own Playwright tests - and reports on the pull request. Its agents use this job's browsers; your app and passwords never leave the job.
+description: 'Qualio tests your pull request against the app this job starts - the tests it keeps for your features, run in this job, and your own Playwright tests - and reports on the pull request. Its agents use this job''s browsers; your app and passwords never leave the job.'
 author: Qualio AI
 branding:
   icon: check-circle
@@ -7,39 +7,39 @@ branding:
 
 inputs:
   api-key:
-    description: The project API key (Settings → API keys), stored as the QUALIO_API_KEY secret.
+    description: 'The project API key (Settings → API keys), stored as the QUALIO_API_KEY secret.'
     required: true
   api-url:
-    description: Qualio's address (the served workflow sets it).
+    description: 'Qualio''s address (the served workflow sets it).'
     required: true
   base-url:
-    description: Where this job's app answers.
+    description: 'Where this job''s app answers.'
     default: http://localhost:3000
   tests-command:
-    description: How your own Playwright tests run (they run as regression; empty when you have none).
+    description: 'How your own Playwright tests run (they run as regression; empty when you have none).'
     default: npx playwright test
   tests-dir:
-    description: The folder your own Playwright tests are in (default: found from playwright.config.*).
+    description: 'The folder your own Playwright tests are in (default: found from playwright.config.*).'
     default: ''
   bash-minutes:
-    description: Deprecated and ignored. The pull request run no longer bashes; start an exploratory run or a bug bash from the app instead.
+    description: 'Deprecated and ignored. The pull request run no longer bashes; start an exploratory run or a bug bash from the app instead.'
     default: '0'
   shard:
-    description: This job's part of a matrix that splits the tests, as i/n (the served workflow sets it from matrix.shard; empty is 1/1).
+    description: 'This job''s part of a matrix that splits the tests, as i/n (the served workflow sets it from matrix.shard; empty is 1/1).'
     default: ''
   workers:
-    description: How many tests run at once in this job (a number, or a share of its cores such as 50%; empty is 50%).
+    description: 'How many tests run at once in this job (a number, or a share of its cores such as 50%; empty is 50%).'
     default: ''
   job-minutes:
-    description: How long the job waits for Qualio at most.
+    description: 'How long the job waits for Qualio at most.'
     default: '60'
   github-token:
-    description: Posts Qualio's report and statuses on the pull request (the workflow needs pull-requests and statuses write).
+    description: 'Posts Qualio''s report and statuses on the pull request (the workflow needs pull-requests and statuses write).'
     default: ${{ github.token }}
 
 outputs:
   result:
-    description: passed, failed or neutral.
+    description: 'passed, failed or neutral.'
     value: ${{ steps.qualio.outputs.result }}
 
 runs:
@@ -51,7 +51,7 @@ runs:
     - name: Install Qualio's runner
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
+      run: npm ci --omit=dev --no-audit --no-fund && npx playwright install --with-deps chromium
     - name: Qualio
       id: qualio
       shell: bash

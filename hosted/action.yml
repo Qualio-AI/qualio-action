@@ -1,5 +1,5 @@
 name: Qualio (hosted)
-description: Asks Qualio to test your pull request on its own browsers - against your preview deploy or the staging environment chosen in Qualio - and waits for the result. Use it when your project's tests are hosted by Qualio.
+description: 'Asks Qualio to test your pull request on its own browsers - against your preview deploy or the staging environment chosen in Qualio - and waits for the result. Use it when your project''s tests are hosted by Qualio.'
 author: Qualio AI
 branding:
   icon: check-circle
@@ -7,22 +7,22 @@ branding:
 
 inputs:
   api-key:
-    description: The project API key (Settings → API keys), stored as the QUALIO_API_KEY secret.
+    description: 'The project API key (Settings → API keys), stored as the QUALIO_API_KEY secret.'
     required: true
   api-url:
-    description: Qualio's address (the served workflow sets it).
+    description: 'Qualio''s address (the served workflow sets it).'
     required: true
   url:
-    description: The preview deploy's URL for this pull request (empty: the staging environment chosen in Qualio).
+    description: 'The preview deploy''s URL for this pull request (empty: the staging environment chosen in Qualio).'
     default: ''
   bash-minutes:
-    description: Deprecated and ignored. The pull request run no longer bashes; start an exploratory run or a bug bash from the app instead.
+    description: 'Deprecated and ignored. The pull request run no longer bashes; start an exploratory run or a bug bash from the app instead.'
     default: '0'
   job-minutes:
-    description: How long to wait for Qualio at most.
+    description: 'How long to wait for Qualio at most.'
     default: '60'
   github-token:
-    description: Posts Qualio's report and statuses on the pull request.
+    description: 'Posts Qualio''s report and statuses on the pull request.'
     default: ${{ github.token }}
 
 runs:
