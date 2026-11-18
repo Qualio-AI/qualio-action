@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The Qualio Basher action (qualio-v2 specs/tickets-pull-requests-and-tests.md → The GitHub Action). One command
+// The Qualio action, v2 (qualio-v2 specs/tickets-pull-requests-and-tests.md → The GitHub Action). One command
 // runs the whole job: tell Qualio about the pull request, lend Qualio's agents this job's browsers, run the tests
 // when Qualio asks, post Qualio's report with the job's GITHUB_TOKEN, and pass or fail the job as Qualio says.
 //

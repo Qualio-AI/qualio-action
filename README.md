@@ -1,4 +1,4 @@
-# Qualio Basher action
+# Qualio action
 
 Runs Qualio on your pull requests from your own GitHub Actions job. Your job starts your app; Qualio:
 
@@ -14,10 +14,10 @@ Qualio's agents run at Qualio; **their browsers run in your job**, next to your 
 Qualio types placeholders such as `{{E2E_ADMIN_PASSWORD}}`, and this job fills them in before they reach the browser.
 
 ```yaml
-- uses: qualio-ai/qualio-basher-action@v1
+- uses: qualio-ai/qualio-action@v2
   with:
     api-key: ${{ secrets.QUALIO_API_KEY }}
-    api-url: https://basher.qualio-ai.com
+    api-url: https://app.qualio-ai.com
     base-url: http://localhost:3000
 ```
 

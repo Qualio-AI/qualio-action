@@ -1,6 +1,6 @@
-# CLAUDE.md — qualio-basher-action
+# CLAUDE.md — the Qualio action (v2)
 
-The GitHub Action of Qualio v2 (the Basher). Its product rules live in `../qualio-v2/CLAUDE.md`; its contract with
+The GitHub Action of Qualio v2 (`qualio-ai/qualio-action@v2`; this folder is `../qualio-basher-action` locally). Its product rules live in `../qualio-v2/CLAUDE.md` (repository `Qualio-AI/qualio`); its contract with
 Qualio in `../qualio-v2/specs/tickets-pull-requests-and-tests.md` (The GitHub Action, The browser host). The global
 `../CLAUDE.md` describes v1's `../qualio-action`, which this was copied from; only its Git guideline applies here.
 

@@ -1,8 +1,8 @@
 {
-  "name": "@qualio-ai/qualio-basher-action",
+  "name": "@qualio-ai/qualio-action",
   "version": "0.0.0",
   "private": true,
-  "description": "The Qualio Basher GitHub Action: runs Qualio's tests for your pull request, lends Qualio's agents browsers next to the app your job starts, and reports on the pull request.",
+  "description": "The Qualio GitHub Action (v2): runs Qualio's tests for your pull request, lends Qualio's agents browsers next to the app your job starts, and reports on the pull request.",
   "license": "UNLICENSED",
   "type": "module",
   "engines": {

@@ -1,4 +1,4 @@
-name: Qualio Basher (hosted)
+name: Qualio (hosted)
 description: Asks Qualio to test your pull request on its own browsers - against your preview deploy or the staging environment chosen in Qualio - and waits for the result. Use it when your project's tests are hosted by Qualio.
 author: Qualio AI
 branding:

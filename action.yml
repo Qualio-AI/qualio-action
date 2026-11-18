@@ -1,4 +1,4 @@
-name: Qualio Basher
+name: Qualio
 description: Qualio tests your pull request against the app this job starts - the tests it keeps for your features, run in this job, and your own Playwright tests - and reports on the pull request. Its agents use this job's browsers; your app and passwords never leave the job.
 author: Qualio AI
 branding:
