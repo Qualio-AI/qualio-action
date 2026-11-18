@@ -29,6 +29,11 @@ test('keeps where a failure’s evidence is, never attachment bodies but Qualio�
   assert.equal(attachments[2].body, 'W10=');
 });
 
+test('keeps each step’s time', () => {
+  const report = { suites: [{ specs: [{ tests: [{ results: [{ status: 'passed', duration: 900, steps: [{ title: 'When I click', duration: 412, steps: [{ title: 'inner' }] }] }] }] }] }] };
+  assert.deepEqual(slimReport(report).suites[0].specs[0].tests[0].results[0].steps, [{ title: 'When I click', duration: 412, error: undefined }]);
+});
+
 test('never writes outside the tests folder, and never hands the tests Qualio’s key or the job’s token', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'qt-'));
   await assert.rejects(writeFiles(root, [{ path: '../escape.ts', content: '' }]), /unsafe path/);

@@ -15,7 +15,7 @@ const MAX_REPORT_BYTES = 8_000_000;
 /** What the tests never see of the job's environment: Qualio's key and the job's GitHub token. */
 const HIDDEN = new Set(['QUALIO_API_KEY', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN']);
 
-/** Drops what Qualio doesn't need (attachment bodies, stdout) so the report fits; keeps where the evidence is. */
+/** Drops what Qualio doesn't need (attachment bodies, stdout) so the report fits; keeps where the evidence is and each step's time. */
 export function slimReport(report) {
   // Qualio's signals keep their body; a video or screenshot only where it is on this runner.
   const attachment = ({ path: where, body, ...rest }) => (rest.name === 'qualio-signals' ? { ...rest, body } : { ...rest, path: where });
@@ -23,7 +23,7 @@ export function slimReport(report) {
     (list ?? []).map((s) => ({
       ...s,
       suites: suites(s.suites),
-      specs: (s.specs ?? []).map((spec) => ({ ...spec, tests: (spec.tests ?? []).map((t) => ({ ...t, results: (t.results ?? []).map((r) => ({ status: r.status, duration: r.duration, error: r.error, errors: r.errors, steps: (r.steps ?? []).map((x) => ({ title: x.title, error: x.error ? true : undefined })), attachments: (r.attachments ?? []).filter((a) => ['qualio-signals', 'video', 'screenshot'].includes(a.name)).map(attachment) })) })) })),
+      specs: (s.specs ?? []).map((spec) => ({ ...spec, tests: (spec.tests ?? []).map((t) => ({ ...t, results: (t.results ?? []).map((r) => ({ status: r.status, duration: r.duration, error: r.error, errors: r.errors, steps: (r.steps ?? []).map((x) => ({ title: x.title, duration: x.duration, error: x.error ? true : undefined })), attachments: (r.attachments ?? []).filter((a) => ['qualio-signals', 'video', 'screenshot'].includes(a.name)).map(attachment) })) })) })),
     }));
   return { suites: suites(report.suites) };
 }
