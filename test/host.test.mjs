@@ -41,3 +41,22 @@ test('adds the JSON reporter to the team’s Playwright command and slims the re
   assert.deepEqual(slim.suites[0].specs[0].tests[0].results[0].attachments, [{ name: 'qualio-signals', body: 'e30=' }]);
   assert.equal(slim.suites[0].specs[0].tests[0].results[0].stdout, undefined);
 });
+
+test('opens the engine Qualio asks for, only one this job runs', async () => {
+  const { requestedEngine } = await import('../scripts/host.mjs');
+  assert.equal(requestedEngine({ type: 'open' }, ['chromium']), 'chromium');
+  assert.equal(requestedEngine({ type: 'open', engine: 'webkit' }, ['chromium', 'webkit']), 'webkit');
+  assert.equal(requestedEngine({ type: 'open', engine: 'webkit' }, ['chromium']), null);
+  assert.equal(requestedEngine({ type: 'open', engine: 'netscape' }, ['chromium', 'netscape']), null);
+});
+
+test('installs the engines Qualio’s profiles need beyond Chromium, and falls back to Chromium', async () => {
+  const { installEngines } = await import('../scripts/qualio.mjs');
+  const asked = [];
+  const quiet = () => undefined;
+  assert.deepEqual(await installEngines(undefined, { install: async (e) => (asked.push(e), true), log: quiet }), ['chromium']);
+  assert.deepEqual(asked, []);
+  assert.deepEqual(await installEngines(['webkit', 'chromium', 'nope'], { install: async (e) => (asked.push(e), true), log: quiet }), ['chromium', 'webkit']);
+  assert.deepEqual(asked, [['webkit']]);
+  assert.deepEqual(await installEngines(['firefox'], { install: async () => false, log: quiet }), ['chromium']);
+});

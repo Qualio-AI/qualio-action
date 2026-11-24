@@ -8,8 +8,10 @@
 // Qualio about the pull request, hosts the agents' browsers and posts the report); every shard runs the tests
 // Qualio gives it.
 
+import { spawn } from 'node:child_process';
 import { appendFile, readFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deliver } from './github.mjs';
 import { readTests, testsDir } from './inventory.mjs';
 
@@ -29,6 +31,36 @@ export async function upload(route, bytes, contentType) {
     }
     await sleep(attempt * 2000);
   }
+}
+
+const ENGINES = ['chromium', 'firefox', 'webkit'];
+
+/** The engines Qualio asked for (its browser profiles' engines), known ones only; always Chromium. */
+export function wantedEngines(asked) {
+  const wanted = new Set(['chromium', ...(Array.isArray(asked) ? asked : [])]);
+  return ENGINES.filter((engine) => wanted.has(engine));
+}
+
+/**
+ * Installs the browsers Qualio's profiles need beyond Chromium (installed with the action): Firefox, WebKit
+ * (qualio-v2 phase 29). An engine that fails to install is left out, and Qualio is told which engines run.
+ */
+export async function installEngines(asked, { install = runInstall, log = console.log } = {}) {
+  const wanted = wantedEngines(asked);
+  const extra = wanted.filter((engine) => engine !== 'chromium');
+  if (!extra.length) return wanted;
+  log(`Installing ${extra.join(' and ')} for Qualio’s browser profiles…`);
+  const ok = await install(extra).catch(() => false);
+  if (!ok) log(`${extra.join(' and ')} couldn’t be installed: this job runs Chromium only.`);
+  return ok ? wanted : ['chromium'];
+}
+
+function runInstall(engines) {
+  const actionDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  return new Promise((resolve) => {
+    const child = spawn('npx', ['playwright', 'install', '--with-deps', ...engines], { cwd: actionDir, stdio: ['ignore', 'inherit', 'inherit'] });
+    child.on('close', (code) => resolve(code === 0)).on('error', () => resolve(false));
+  });
 }
 
 /** This job's shard of the workflow's matrix: `i/n` (default 1/1). */
@@ -204,6 +236,10 @@ export async function main() {
   // A Qualio from before shards answers no `lead`: this job leads.
   const lead = started.body.lead !== false;
   exportAccounts(accounts);
+  // Every shard runs browsers (the leader hosts the agents'; every shard runs tests): the engines Qualio needs.
+  const engines = await installEngines(started.body.engines);
+  // Qualio's tests in this job run only the profiles whose engine is here (the generated config reads it).
+  env.QUALIO_ENGINES = engines.join(',');
   if (shard.total > 1) console.log(`Job ${shard.index} of ${shard.total}${lead ? ': it leads the run' : ''}.`);
   // Your own tests: their titles tell Qualio which spec cases are covered already.
   const root = env.GITHUB_WORKSPACE || process.cwd();
@@ -217,8 +253,8 @@ export async function main() {
   let host = null;
   if (lead && token) {
     const { runHost } = await import('./host.mjs');
-    const { chromium } = await import('@playwright/test');
-    host = runHost({ relay: relayUrl, token, launchServer: (options) => chromium.launchServer(options) });
+    const playwright = await import('@playwright/test');
+    host = runHost({ relay: relayUrl, token, engines, launchServer: (options, engine) => playwright[engine].launchServer(options) });
   }
   const deadline = Date.now() + Number(env.QUALIO_JOB_MINUTES || 60) * 60_000;
   let status = { state: 'STARTED' };

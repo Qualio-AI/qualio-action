@@ -1,7 +1,8 @@
 // The job's browser host (qualio-v2 specs/tickets-pull-requests-and-tests.md → The browser host). Qualio's agents
 // run at Qualio; their browsers run here, next to the app this job started, so nothing about the app is public.
 // The host keeps one outbound WebSocket to Qualio's relay; for each browser Qualio asks for, it opens a channel and
-// pipes it to a local Chromium (Playwright's launchServer). Passwords never leave the job: Qualio types placeholders
+// pipes it to a local browser server (Playwright's launchServer) of the engine it asks for: Chromium, Firefox or
+// WebKit, each started on first use (qualio-v2 phase 29). Passwords never leave the job: Qualio types placeholders
 // such as {{E2E_ADMIN_PASSWORD}}, which the host fills from this job's environment before they reach the browser.
 
 import { WebSocket } from 'ws';
@@ -17,23 +18,32 @@ export function fillPlaceholders(frame, env = process.env) {
 /** A URL of the relay with its path and token. */
 const relayUrl = (base, path, token) => `${base.replace(/\/+$/, '')}${path}?token=${encodeURIComponent(token)}`;
 
+const ENGINES = ['chromium', 'firefox', 'webkit'];
+
+/** The engine an `open` asks for: one this host runs, Chromium when it names none (a Qualio from before phase 29). */
+export function requestedEngine(message, engines) {
+  const engine = message.engine ?? 'chromium';
+  return ENGINES.includes(engine) && engines.includes(engine) ? engine : null;
+}
+
 /**
- * Hosts browsers for Qualio until `stop()`: a control connection, a local browser server started on first use,
- * one channel per Playwright connection. `launchServer` is Playwright's (injected in tests).
+ * Hosts browsers for Qualio until `stop()`: a control connection that says which `engines` it runs (`hello`), a
+ * local browser server per engine started on first use, one channel per Playwright connection. `launchServer`
+ * (options, engine) is Playwright's (injected in tests).
  */
-export function runHost({ relay, token, env = process.env, launchServer, log = console.log }) {
-  let server = null;
+export function runHost({ relay, token, env = process.env, launchServer, engines = ['chromium'], log = console.log }) {
+  const servers = new Map();
   let control = null;
   let stopped = false;
   const sockets = new Set();
-  const local = async () => {
-    server ??= launchServer({ args: ['--disable-dev-shm-usage'] });
-    return (await server).wsEndpoint();
+  const local = async (engine) => {
+    if (!servers.has(engine)) servers.set(engine, launchServer(engine === 'chromium' ? { args: ['--disable-dev-shm-usage'] } : {}, engine));
+    return (await servers.get(engine)).wsEndpoint();
   };
 
-  const openChannel = async (channel) => {
+  const openChannel = async (channel, engine) => {
     // The browser server first: frames Qualio already sent arrive as soon as the channel opens.
-    const endpoint = await local();
+    const endpoint = await local(engine);
     const remote = new WebSocket(relayUrl(relay, `/channel/${channel}`, token), { maxPayload: 256 * 1024 * 1024 });
     const browser = new WebSocket(endpoint, { maxPayload: 256 * 1024 * 1024 });
     sockets.add(remote).add(browser);
@@ -63,7 +73,10 @@ export function runHost({ relay, token, env = process.env, launchServer, log = c
   const connect = () => {
     if (stopped) return;
     control = new WebSocket(relayUrl(relay, '/host', token));
-    control.on('open', () => log('Qualio’s agents can use this job’s browsers now.'));
+    control.on('open', () => {
+      control.send(JSON.stringify({ type: 'hello', engines }));
+      log('Qualio’s agents can use this job’s browsers now.');
+    });
     control.on('message', (data) => {
       let message;
       try {
@@ -71,7 +84,10 @@ export function runHost({ relay, token, env = process.env, launchServer, log = c
       } catch {
         return;
       }
-      if (message.type === 'open' && /^[a-f0-9]{8,64}$/.test(message.channel ?? '')) openChannel(message.channel).catch((error) => log(`A browser for Qualio couldn’t start: ${error.message}`));
+      if (message.type !== 'open' || !/^[a-f0-9]{8,64}$/.test(message.channel ?? '')) return;
+      const engine = requestedEngine(message, engines);
+      if (!engine) return log(`Qualio asked for ${message.engine}, which this job doesn’t run.`);
+      openChannel(message.channel, engine).catch((error) => log(`A browser for Qualio couldn’t start: ${error.message}`));
     });
     // A dropped connection comes back (the relay may restart); a refused token ends hosting.
     control.on('unexpected-response', (_req, res) => {
@@ -87,7 +103,7 @@ export function runHost({ relay, token, env = process.env, launchServer, log = c
       stopped = true;
       control?.close();
       for (const s of sockets) s.close();
-      if (server) await (await server).close().catch(() => undefined);
+      for (const server of servers.values()) await (await server.catch(() => null))?.close().catch(() => undefined);
     },
   };
 }
