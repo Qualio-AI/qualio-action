@@ -72,3 +72,11 @@ test('downloads a task’s tests, runs only its files with the job’s secrets, 
   assert.ok(specs.every((s) => s.tests[0].results[0].status === 'passed'));
   assert.deepEqual(await readdir(runnerTemp), [], 'the tests folder is gone');
 });
+
+test('keeps a test of an AI feature’s result, and no other annotation (qualio-v2 phase 34)', () => {
+  const ai = { type: 'qualio-ai', description: '{"caseId":"TC-3","held":2,"of":3}' };
+  const report = { suites: [{ specs: [{ tests: [{ annotations: [{ type: 'issue', description: 'x' }, ai], results: [{ status: 'passed', duration: 5, annotations: [ai, { type: 'slow' }] }] }] }] }] };
+  const test0 = slimReport(report).suites[0].specs[0].tests[0];
+  assert.deepEqual(test0.annotations, [ai]);
+  assert.deepEqual(test0.results[0].annotations, [ai]);
+});
