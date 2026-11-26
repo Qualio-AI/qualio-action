@@ -36,3 +36,9 @@ npm test
 The contract with Qualio (`/v1/pr/sync`, `/v1/runs/start`, `/v1/runs/:id/status`, `/tests`, `/results`, `/evidence`,
 `/v1/pr/outbox`, the relay) is in `../qualio-v2/specs/tickets-pull-requests-and-tests.md` and
 `../qualio-v2/specs/regression-exploratory-and-bug-bash.md` (Tests run in the job); change both together.
+
+**What a pull request changed** (qualio-v2 phase 40, `../qualio-v2/specs/pull-request-changes.md`): `/v1/pr/sync`
+and `/v1/runs/hosted` carry `changes` (`scripts/changes.mjs`): the pull request's changed files and their patches,
+read with the job's own `GITHUB_TOKEN` (the workflow's `pull-requests` permission), capped in size, without the
+patches of lockfiles and of files that may hold secrets, and with secret-looking values masked. Qualio checks the
+changes on the pull request's preview and reports them in its comment and the `qualio/changes` status.

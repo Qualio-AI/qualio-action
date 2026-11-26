@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { appendFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pullRequestChanges } from './changes.mjs';
 import { deliver } from './github.mjs';
 import { readTests, testsDir } from './inventory.mjs';
 
@@ -120,6 +121,8 @@ async function sync(event) {
     authorLogin: pr.user?.login ?? null,
     state: pr.merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'open',
     mergeCommitSha: pr.merged ? (pr.merge_commit_sha ?? null) : null,
+    // What it changed (qualio-v2 phase 40): Qualio checks it on the pull request's preview.
+    changes: await pullRequestChanges(pr, env),
   });
   if (status !== 200) console.log(`::warning title=Qualio::Qualio could not record pull request #${pr.number} (${status}): ${body.error ?? 'unknown error'}`);
   else if (body.features?.length) console.log(`Pull request #${pr.number} implements ${body.features.join(', ')}.`);
@@ -175,6 +178,7 @@ export async function hosted() {
     sha: pr?.head?.sha ?? (env.GITHUB_SHA || ''),
     url: env.QUALIO_HOSTED_URL || null,
     pr: pr ? { number: pr.number, title: pr.title ?? '', body: pr.body ?? '', branch: pr.head?.ref ?? '', baseBranch: pr.base?.ref ?? '', headSha: pr.head?.sha ?? '', url: pr.html_url ?? null, authorLogin: pr.user?.login ?? null, state: pr.merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'open', mergeCommitSha: pr.merged ? (pr.merge_commit_sha ?? null) : null } : null,
+    changes: await pullRequestChanges(pr, env),
   });
   if (started.status !== 200) throw new Error(`Qualio refused the run (${started.status}): ${started.body.error ?? 'unknown error'}`);
   let status = { state: started.body.state ?? 'STARTED' };
